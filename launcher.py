@@ -47,8 +47,8 @@ TASK_DEFS = [
 
 TASK_LOCAL = threading.local()  # 任务线程上下文，线程
 
-SCHEDULE_REFRESH_SECONDS = 10  # 触发时间刷新间隔，秒
-WS_STATUS_STALE_SECONDS = 15  # WS状态超时，秒
+SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
+WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
 MAX_LOG_LINE_CHARS = 2000  # 单行日志最大长度，字符
 TASK_FREQUENCY = {
     "D10001": "每4小时",

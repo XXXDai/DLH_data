@@ -26,16 +26,16 @@ RT_DIR = Path("data/src/polymarket_orderbook_rt")  # 原始数据目录，路径
 RT_SS_DIR = Path("data/src/polymarket_orderbook_rt_ss")  # 快照数据目录，路径
 RT_TAG = "polymarket_orderbook_rt"  # 原始数据标识，字符串
 RT_SS_TAG = "polymarket_orderbook_rt_ss"  # 快照数据标识，字符串
-HTTP_TIMEOUT_SECONDS = 10  # 事件请求超时，秒
-WS_TIMEOUT_SECONDS = 10  # 连接超时，秒
-RECV_TIMEOUT_SECONDS = 30  # 接收超时，秒
-RECONNECT_INTERVAL_SECONDS = 5  # 重连间隔，秒
-STATUS_INTERVAL_SECONDS = 1  # 状态输出间隔，秒
-PING_INTERVAL_SECONDS = 10  # 心跳间隔，秒
-PRECONNECT_LEAD_SECONDS = 60  # 预连接提前量，秒
-BECOME_ACTIVE_AFTER_SECONDS = 90  # 预连接最大等待，秒
-SCHEDULER_TICK_SECONDS = 1  # 调度循环间隔，秒
-BATCH_SIZE = 2000  # 单文件最大记录数，条
+HTTP_TIMEOUT_SECONDS = app_config.HTTP_TIMEOUT_SECONDS  # 事件请求超时，秒
+WS_TIMEOUT_SECONDS = app_config.WS_TIMEOUT_SECONDS  # 连接超时，秒
+RECV_TIMEOUT_SECONDS = app_config.WS_RECV_TIMEOUT_SECONDS  # 接收超时，秒
+RECONNECT_INTERVAL_SECONDS = app_config.WS_RECONNECT_INTERVAL_SECONDS  # 重连间隔，秒
+STATUS_INTERVAL_SECONDS = app_config.WS_STATUS_INTERVAL_SECONDS  # 状态输出间隔，秒
+PING_INTERVAL_SECONDS = app_config.WS_PING_INTERVAL_SECONDS  # 心跳间隔，秒
+PRECONNECT_LEAD_SECONDS = app_config.PRECONNECT_LEAD_SECONDS  # 预连接提前量，秒
+BECOME_ACTIVE_AFTER_SECONDS = app_config.BECOME_ACTIVE_AFTER_SECONDS  # 预连接最大等待，秒
+SCHEDULER_TICK_SECONDS = app_config.SCHEDULER_TICK_SECONDS  # 调度循环间隔，秒
+BATCH_SIZE = app_config.BATCH_SIZE  # 单文件最大记录数，条
 QUIET = bool(globals().get("QUIET", False))  # 静默模式开关，开关
 STATUS_HOOK = globals().get("STATUS_HOOK")  # 状态回调函数，函数
 LOG_HOOK = globals().get("LOG_HOOK")  # 日志回调函数，函数
@@ -664,18 +664,37 @@ def run_event_loop(asset_tag: str, template: str, name: str, symbol: str) -> Non
         time.sleep(SCHEDULER_TICK_SECONDS)
 
 
+def run_fixed_event(event_url: str) -> None:
+    status_key = f"固定 {extract_slug(event_url)}"  # 状态键，字符串
+    while True:
+        asset_ids = load_asset_ids(event_url, "", "")
+        if asset_ids:
+            stop_event = threading.Event()
+            active_event = threading.Event()
+            ready_event = threading.Event()
+            active_event.set()
+            run_stream(asset_ids, event_url, status_key, stop_event, active_event, ready_event)
+        time.sleep(RECONNECT_INTERVAL_SECONDS)
+
+
 def main() -> None:
     threads = []
+    fixed_urls = [item for item in EVENT_URL_TEMPLATES if "{" not in item]  # 固定事件列表，个数
+    dynamic_templates = [item for item in EVENT_URL_TEMPLATES if "{" in item]  # 动态模板列表，个数
     for asset_tag in ASSET_TAGS:
         name, symbol, include_5m = parse_asset_tag(asset_tag)
         if not name or not symbol:
             continue
-        for template in EVENT_URL_TEMPLATES:
+        for template in dynamic_templates:
             if "5m" in template and not include_5m:
                 continue
             thread = threading.Thread(target=run_event_loop, args=(asset_tag, template, name, symbol))
             thread.start()
             threads.append(thread)
+    for event_url in fixed_urls:
+        thread = threading.Thread(target=run_fixed_event, args=(event_url,))
+        thread.start()
+        threads.append(thread)
     for thread in threads:
         thread.join()
 
