@@ -29,6 +29,7 @@ LOOP_INTERVAL_SECONDS = 4 * 60 * 60  # 循环间隔，秒
 INITIAL_BACKFILL_DAYS = 7  # 首次回填天数，天
 FAIL_LOG_DIR = Path("D10005")  # 失败记录目录，路径
 QUIET = False  # 静默模式开关，开关
+STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
 FAIL_LOCK = threading.Lock()  # 失败记录锁，锁
 
@@ -38,6 +39,10 @@ def log(message: str) -> None:
         LOG_HOOK(message)
     if not QUIET:
         print(message)
+
+def status_update(symbol: str, text: str) -> None:
+    if STATUS_HOOK:
+        STATUS_HOOK(symbol, text)
 
 
 def seconds_until_next_utc_midnight() -> int:
@@ -252,6 +257,7 @@ def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: P
         url = build_url(BASE_URL, symbol, date_str)
         file_name = Path(urlparse(url).path).name
         log(f"日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
+        status_update(symbol, f"{idx}/{total_days} {date_str} {file_name}")
         attempted.add(url)
         download_by_url(url, date_str, symbol, fail_path, failures)
     return attempted
@@ -271,6 +277,7 @@ def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path)
         if url in skip_urls:
             continue
         date_str = item.get("日期") or "未知日期"
+        status_update(symbol, f"重试 {date_str} {Path(urlparse(url).path).name}")
         download_by_url(url, date_str, symbol, fail_path, failures)
 
 
@@ -278,6 +285,7 @@ def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path)
     date_str = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     log(f"当前日期下载: {date_str}（UTC）")
     url = build_url(BASE_URL, symbol, date_str)
+    status_update(symbol, f"今日 {date_str} {Path(urlparse(url).path).name}")
     if url in skip_urls:
         log("今日数据已在本轮尝试中，跳过重复请求")
         return

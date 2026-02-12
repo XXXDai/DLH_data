@@ -30,6 +30,7 @@ WS_TIMEOUT_SECONDS = 10  # 连接超时，秒
 RECV_TIMEOUT_SECONDS = 30  # 接收超时，秒
 RECONNECT_INTERVAL_SECONDS = 5  # 重连间隔，秒
 STATUS_INTERVAL_SECONDS = 1  # 状态输出间隔，秒
+PING_INTERVAL_SECONDS = 10  # 心跳间隔，秒
 BATCH_SIZE = 2000  # 单文件最大记录数，条
 QUIET = bool(globals().get("QUIET", False))  # 静默模式开关，开关
 STATUS_HOOK = globals().get("STATUS_HOOK")  # 状态回调函数，函数
@@ -95,19 +96,44 @@ def fetch_event(slug: str) -> dict:
 def extract_asset_ids(event: dict) -> list:
     asset_ids = []
     for market in event.get("markets", []):
-        for token_id in market.get("clobTokenIds", []):
-            asset_ids.append(str(token_id))
+        token_ids = market.get("clobTokenIds", [])
+        if isinstance(token_ids, str):
+            current = []
+            for ch in token_ids:
+                if "0" <= ch <= "9":
+                    current.append(ch)
+                    continue
+                if current:
+                    asset_ids.append("".join(current))
+                    current = []
+            if current:
+                asset_ids.append("".join(current))
+            continue
+        if isinstance(token_ids, list):
+            for token_id in token_ids:
+                text = str(token_id)
+                if text.isdigit():
+                    asset_ids.append(text)
     return asset_ids
 
 
 def connect_ws() -> websocket.WebSocket:
-    ws = websocket.create_connection(WS_URL, timeout=WS_TIMEOUT_SECONDS)
+    ws = websocket.create_connection(WS_URL, timeout=WS_TIMEOUT_SECONDS, origin="https://polymarket.com")
     ws.settimeout(RECV_TIMEOUT_SECONDS)
     return ws
 
 
+def normalize_asset_ids(asset_ids: list) -> list:
+    normalized = []
+    for item in asset_ids:
+        text = str(item)
+        if text.isdigit():
+            normalized.append(text)
+    return normalized
+
+
 def send_subscribe(ws: websocket.WebSocket, asset_ids: list) -> None:
-    payload = {"type": "subscribe", "channel": "market", "assets_ids": asset_ids}
+    payload = {"type": "market", "assets_ids": normalize_asset_ids(asset_ids)}
     ws.send(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
 
 
@@ -339,6 +365,21 @@ def run_once(asset_ids: list, event_key: str) -> None:
     except OSError as exc:
         log(f"网络错误，准备重连: {exc}")
         return
+    stop_event = threading.Event()
+
+    def keepalive():
+        while not stop_event.is_set():
+            time.sleep(PING_INTERVAL_SECONDS)
+            try:
+                ws.send("PING")
+            except websocket.WebSocketException:
+                break
+            except TimeoutError:
+                break
+            except OSError:
+                break
+    keepalive_thread = threading.Thread(target=keepalive, daemon=True)
+    keepalive_thread.start()
     rt_writer = None
     rt_ss_writer = None
     recv_count = 0
@@ -361,12 +402,14 @@ def run_once(asset_ids: list, event_key: str) -> None:
         if now_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
             if STATUS_HOOK:
                 STATUS_HOOK(event_key, recv_count)
-            if LOG_HOOK:
-                LOG_HOOK(f"已接收数量: {recv_count}")
             if not QUIET:
                 print(f"\r已接收数量: {recv_count}", end="", flush=True)
             last_status_ts = now_ts
         collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        if not raw:
+            continue
+        if isinstance(raw, str) and raw[:1] not in {"{", "["}:
+            continue
         msg = json.loads(raw)
         for payload in iter_payload(msg):
             record = build_raw_record(payload, collect_ts)
@@ -396,6 +439,7 @@ def run_once(asset_ids: list, event_key: str) -> None:
                 json.dumps(snapshot, ensure_ascii=True, separators=(",", ":")) + "\n"
             )
             rt_ss_writer["count"] += 1
+    stop_event.set()
     close_writer(rt_writer)
     close_writer(rt_ss_writer)
 

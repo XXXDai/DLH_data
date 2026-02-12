@@ -327,8 +327,8 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
     install_thread_task_inheritance(thread_task_map)
 
     def make_hook(task_id: str):
-        def hook(key: str, count: int) -> None:
-            status_counts.setdefault(task_id, {})[key] = count
+        def hook(key: str, value) -> None:
+            status_counts.setdefault(task_id, {})[key] = value
             status_times[task_id] = time.time()
         return hook
 
@@ -375,7 +375,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                 break
             status = "运行中" if task.is_running() else "已退出"
             counts = status_counts.get(task.task_id, {})
-            total_count = sum(counts.values()) if counts else 0
+            total_count = sum(value for value in counts.values() if isinstance(value, (int, float)))
             last_ts = status_times.get(task.task_id)
             last_text = time.strftime("%H:%M:%S", time.localtime(last_ts)) if last_ts else "-"
             prefix = ">" if idx == selected else " "
@@ -401,10 +401,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                 stdscr.addstr(0, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
                 stdscr.addstr(1, log_col, truncate_by_cells(f"日志: {current.name}", max_cols - log_col - 1))
             status_lines = []
-            if current.task_id in {"D10002-4", "D10006-8"}:
+            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10002-4", "D10006-8"}:
                 counts = status_counts.get(current.task_id, {})
-                total = sum(counts.values()) if counts else 0
-                status_lines.append(f"订阅计数（总计: {total}）")
+                numeric_total = sum(value for value in counts.values() if isinstance(value, (int, float)))
+                title = f"订阅计数（总计: {numeric_total}）" if current.task_id in {"D10002-4", "D10006-8"} else "下载状态"
+                status_lines.append(title)
                 for key in sorted(counts):
                     status_lines.append(f"{key}: {counts[key]}")
             if status_lines:
