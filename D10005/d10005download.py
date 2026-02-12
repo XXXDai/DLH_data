@@ -52,6 +52,17 @@ def seconds_until_next_utc_midnight() -> int:
     return seconds if seconds > 0 else 1
 
 
+def seconds_until_next_utc_4h() -> int:
+    now = datetime.now(tz=timezone.utc)
+    hour_block = (now.hour // 4 + 1) * 4
+    if hour_block >= 24:
+        next_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        next_dt = now.replace(hour=hour_block, minute=0, second=0, microsecond=0)
+    seconds = int((next_dt - now).total_seconds())
+    return seconds if seconds > 0 else 1
+
+
 def build_fail_log_path() -> Path:
     return FAIL_LOG_DIR / "download_failures.json"
 
@@ -331,8 +342,8 @@ def run_symbol(symbol: str) -> None:
         done_count = retry_failures(failures, skip_urls, symbol, fail_path, done_count)
         done_count = download_today(failures, skip_urls, symbol, fail_path, done_count)
         skip_urls = set()
-        sleep_seconds = seconds_until_next_utc_midnight()
-        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
+        sleep_seconds = seconds_until_next_utc_4h()
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 每4小时）")
         time.sleep(sleep_seconds)
 
 

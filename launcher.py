@@ -50,13 +50,13 @@ TASK_LOCAL = threading.local()  # 任务线程上下文，线程
 SCHEDULE_REFRESH_SECONDS = 10  # 触发时间刷新间隔，秒
 MAX_LOG_LINE_CHARS = 2000  # 单行日志最大长度，字符
 TASK_FREQUENCY = {
-    "D10001": "每日",
-    "D10005": "每日",
+    "D10001": "每4小时",
+    "D10005": "每4小时",
     "D10011": "每日",
     "D10012": "每日",
     "D10013": "每日",
-    "D10014": "每日",
-    "D10015": "每日",
+    "D10014": "每4小时",
+    "D10015": "每4小时",
     "D10016": "每日",
     "D10017": "每日",
     "D10018": "每日",
@@ -176,6 +176,16 @@ def seconds_until_next_utc_hour(now: datetime) -> int:
     return seconds if seconds > 0 else 1
 
 
+def seconds_until_next_utc_4h(now: datetime) -> int:
+    hour_block = (now.hour // 4 + 1) * 4
+    if hour_block >= 24:
+        next_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        next_dt = now.replace(hour=hour_block, minute=0, second=0, microsecond=0)
+    seconds = math.ceil((next_dt - now).total_seconds())
+    return seconds if seconds > 0 else 1
+
+
 def format_countdown(seconds: int) -> str:
     seconds = max(0, int(seconds))
     days, rem = divmod(seconds, 24 * 3600)
@@ -192,6 +202,14 @@ def compute_next_trigger(task_id: str) -> tuple[str, str]:
     if frequency == "每日":
         next_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         eta = seconds_until_next_utc_midnight(now)
+        return next_dt.strftime("%Y-%m-%d %H:%M:%S"), format_countdown(eta)
+    if frequency == "每4小时":
+        hour_block = (now.hour // 4 + 1) * 4
+        if hour_block >= 24:
+            next_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            next_dt = now.replace(hour=hour_block, minute=0, second=0, microsecond=0)
+        eta = seconds_until_next_utc_4h(now)
         return next_dt.strftime("%Y-%m-%d %H:%M:%S"), format_countdown(eta)
     if frequency == "每小时":
         next_dt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)

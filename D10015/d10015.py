@@ -35,6 +35,17 @@ def seconds_until_next_utc_midnight() -> int:
     return seconds if seconds > 0 else 1
 
 
+def seconds_until_next_utc_4h() -> int:
+    now = datetime.now(tz=timezone.utc)
+    hour_block = (now.hour // 4 + 1) * 4
+    if hour_block >= 24:
+        next_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        next_dt = now.replace(hour=hour_block, minute=0, second=0, microsecond=0)
+    seconds = int((next_dt - now).total_seconds())
+    return seconds if seconds > 0 else 1
+
+
 def build_input_path(base_dir: Path, symbol: str, date_str: str) -> Path:
     file_name = f"{symbol}{date_str}.csv.gz"
     return base_dir / symbol / file_name
@@ -181,8 +192,8 @@ def main() -> None:
         for symbol in SYMBOLS:
             for date_str in iter_available_dates(symbol):
                 process_date(symbol, date_str)
-        sleep_seconds = seconds_until_next_utc_midnight()
-        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
+        sleep_seconds = seconds_until_next_utc_4h()
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 每4小时）")
         time.sleep(sleep_seconds)
 
 def run() -> None:
