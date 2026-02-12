@@ -433,15 +433,15 @@ def run_stream(
             ws = connect_ws()
             send_subscribe(ws, asset_ids)
         except websocket.WebSocketException as exc:
-            log(f"连接异常，准备重连: {exc} {event_url}")
+            log(f"{status_key} 连接异常，准备重连: {exc} {event_url}")
             time.sleep(RECONNECT_INTERVAL_SECONDS)
             continue
         except TimeoutError as exc:
-            log(f"连接超时，准备重连: {exc} {event_url}")
+            log(f"{status_key} 连接超时，准备重连: {exc} {event_url}")
             time.sleep(RECONNECT_INTERVAL_SECONDS)
             continue
         except OSError as exc:
-            log(f"网络错误，准备重连: {exc} {event_url}")
+            log(f"{status_key} 网络错误，准备重连: {exc} {event_url}")
             time.sleep(RECONNECT_INTERVAL_SECONDS)
             continue
 
@@ -463,13 +463,13 @@ def run_stream(
             try:
                 raw = ws.recv()
             except websocket.WebSocketException as exc:
-                log(f"连接异常，准备重连: {exc} {event_url}")
+                log(f"{status_key} 连接异常，准备重连: {exc} {event_url}")
                 break
             except TimeoutError as exc:
-                log(f"连接超时，准备重连: {exc} {event_url}")
+                log(f"{status_key} 连接超时，准备重连: {exc} {event_url}")
                 break
             except OSError as exc:
-                log(f"网络错误，准备重连: {exc} {event_url}")
+                log(f"{status_key} 网络错误，准备重连: {exc} {event_url}")
                 break
 
             recv_count += 1

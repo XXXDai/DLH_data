@@ -5,6 +5,9 @@ import importlib
 import threading
 import time
 import sys
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 import websocket
 
 ROOT_DIR = Path(__file__).resolve().parents[1]  # 项目根目录，路径
@@ -13,6 +16,12 @@ if str(ROOT_DIR) not in sys.path:
 app_config = importlib.import_module("app_config")  # 项目配置模块，模块
 
 WS_URL = "wss://stream.bybit.com/v5/public/linear"  # WebSocket地址，字符串
+INSTRUMENTS_BASE_URL = "https://api.bybit.com/v5/market/instruments-info"  # 交易对接口地址，字符串
+INSTRUMENTS_TIMEOUT_SECONDS = 10  # 交易对接口超时，秒
+INSTRUMENTS_LIMIT = 1000  # 交易对接口分页大小，条
+DELIVERY_CATEGORIES = app_config.BYBIT_FUTURE_DELIVERY_CATEGORIES  # 交割合约产品类型列表，个数
+DELIVERY_STATUSES = app_config.BYBIT_FUTURE_DELIVERY_STATUSES  # 交割合约状态列表，个数
+DELIVERY_EXCLUDE = app_config.BYBIT_FUTURE_DELIVERY_EXCLUDE  # 交割合约过滤列表，个数
 SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数
 DEPTH = 200  # 订单簿深度，档位
 RT_DIR = Path("data/src/bybit_future_orderbook_rt")  # 原始数据目录，路径
@@ -25,9 +34,11 @@ TIMEOUT_SECONDS = 10  # 连接超时，秒
 RECV_TIMEOUT_SECONDS = 30  # 接收超时，秒
 RECONNECT_INTERVAL_SECONDS = 5  # 重连间隔，秒
 STATUS_INTERVAL_SECONDS = 1  # 状态输出间隔，秒
+DELIVERY_REFRESH_SECONDS = 15 * 60  # 交割合约刷新间隔，秒
 QUIET = bool(globals().get("QUIET", False))  # 静默模式开关，开关
 STATUS_HOOK = globals().get("STATUS_HOOK")  # 状态回调函数，函数
 LOG_HOOK = globals().get("LOG_HOOK")  # 日志回调函数，函数
+THREAD_LOCK = threading.Lock()  # 线程锁，锁
 
 
 def log(message: str) -> None:
@@ -35,6 +46,65 @@ def log(message: str) -> None:
         LOG_HOOK(message)
     if not QUIET:
         print(message)
+
+
+def request_json(url: str) -> dict:
+    with urlopen(url, timeout=INSTRUMENTS_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def build_instruments_url(category: str, status: str, cursor: str | None) -> str:
+    params = {
+        "category": category,
+        "status": status,
+        "limit": INSTRUMENTS_LIMIT,
+    }
+    if cursor:
+        params["cursor"] = cursor
+    return f"{INSTRUMENTS_BASE_URL}?{urlencode(params)}"
+
+
+def list_delivery_symbols(start_date: str) -> dict:
+    start_ts = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    start_ms = int(start_ts.timestamp() * 1000)
+    symbols = {}
+    for category in DELIVERY_CATEGORIES:
+        for status in DELIVERY_STATUSES:
+            cursor = None
+            while True:
+                url = build_instruments_url(category, status, cursor)
+                payload = request_json(url)
+                if payload.get("retCode") != 0:
+                    log(f"接口返回错误: {payload.get('retMsg')}")
+                    break
+                result = payload.get("result", {})
+                items = result.get("list", [])
+                for item in items:
+                    contract_type = item.get("contractType", "")
+                    if "Futures" not in contract_type and "Perpetual" not in contract_type:
+                        continue
+                    delivery_time = int(item.get("deliveryTime", "0") or 0)
+                    if delivery_time == 0:
+                        continue
+                    if delivery_time < start_ms:
+                        continue
+                    symbol = item.get("symbol")
+                    if symbol and not symbol.endswith("USDT"):
+                        continue
+                    if symbol and symbol not in DELIVERY_EXCLUDE:
+                        symbols[symbol] = delivery_time
+                cursor = result.get("nextPageCursor")
+                if not cursor:
+                    break
+    return symbols
+
+
+def build_active_symbols() -> set:
+    start_date = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    delivery_map = list_delivery_symbols(start_date)
+    active_delivery = {symbol for symbol, ts in delivery_map.items() if ts >= now_ms}
+    return set(SYMBOLS) | active_delivery
 
 
 def build_topic(symbol: str, depth: int) -> str:
@@ -134,19 +204,21 @@ def close_writer(writer) -> None:
         writer[1].close()
 
 
-def run_once(symbol: str) -> None:
+def run_once(symbol: str, stop_event: threading.Event) -> None:
+    if stop_event.is_set():
+        return
     topic = build_topic(symbol, DEPTH)
     try:
         ws = connect_ws()
         send_subscribe(ws, topic)
     except websocket.WebSocketException as exc:
-        log(f"连接异常，准备重连: {exc}")
+        log(f"连接异常，准备重连: {exc} {symbol}")
         return
     except TimeoutError as exc:
-        log(f"连接超时，准备重连: {exc}")
+        log(f"连接超时，准备重连: {exc} {symbol}")
         return
     except OSError as exc:
-        log(f"网络错误，准备重连: {exc}")
+        log(f"网络错误，准备重连: {exc} {symbol}")
         return
     rt_writer = None
     rt_ss_writer = None
@@ -158,16 +230,19 @@ def run_once(symbol: str) -> None:
     last_second = None
     last_snapshot = None
     while True:
+        if stop_event.is_set():
+            ws.close()
+            break
         try:
             raw = ws.recv()
         except websocket.WebSocketException as exc:
-            log(f"连接异常，准备重连: {exc}")
+            log(f"连接异常，准备重连: {exc} {symbol}")
             break
         except TimeoutError as exc:
-            log(f"连接超时，准备重连: {exc}")
+            log(f"连接超时，准备重连: {exc} {symbol}")
             break
         except OSError as exc:
-            log(f"网络错误，准备重连: {exc}")
+            log(f"网络错误，准备重连: {exc} {symbol}")
             break
         recv_count += 1
         now_ts = time.monotonic()
@@ -222,26 +297,67 @@ def run_once(symbol: str) -> None:
     close_writer(rt_ss_1s_writer)
 
 
+def start_symbol_thread(symbol: str, thread_map: dict) -> None:
+    stop_event = threading.Event()
+    thread = threading.Thread(target=run_loop, args=(symbol, stop_event))
+    thread.start()
+    thread_map[symbol] = (thread, stop_event)
+
+
+def refresh_loop(thread_map: dict) -> None:
+    while True:
+        try:
+            desired = build_active_symbols()
+        except HTTPError as exc:
+            log(f"交割合约获取失败，HTTP错误: {exc}")
+            time.sleep(DELIVERY_REFRESH_SECONDS)
+            continue
+        except URLError as exc:
+            log(f"交割合约获取失败，网络错误: {exc}")
+            time.sleep(DELIVERY_REFRESH_SECONDS)
+            continue
+        with THREAD_LOCK:
+            current = set(thread_map.keys())
+            to_stop = current - desired
+            to_start = desired - current
+            for symbol in to_stop:
+                thread, stop_event = thread_map.pop(symbol)
+                stop_event.set()
+            for symbol in sorted(to_start):
+                start_symbol_thread(symbol, thread_map)
+        time.sleep(DELIVERY_REFRESH_SECONDS)
+
+
 def main() -> None:
-    if not SYMBOLS:
+    thread_map = {}
+    try:
+        desired = build_active_symbols()
+    except HTTPError as exc:
+        log(f"交割合约获取失败，HTTP错误: {exc}")
+        desired = set(SYMBOLS)
+    except URLError as exc:
+        log(f"交割合约获取失败，网络错误: {exc}")
+        desired = set(SYMBOLS)
+    if not desired:
         log("未配置交易对")
         return
-    threads = []
-    for symbol in SYMBOLS:
-        thread = threading.Thread(target=run_loop, args=(symbol,))
-        thread.start()
-        threads.append(thread)
-    for thread in threads:
-        thread.join()
+    with THREAD_LOCK:
+        for symbol in sorted(desired):
+            start_symbol_thread(symbol, thread_map)
+    refresh_thread = threading.Thread(target=refresh_loop, args=(thread_map,))
+    refresh_thread.start()
+    refresh_thread.join()
 
 
 def run() -> None:
     main()
 
 
-def run_loop(symbol: str) -> None:
-    while True:
-        run_once(symbol)
+def run_loop(symbol: str, stop_event: threading.Event) -> None:
+    while not stop_event.is_set():
+        run_once(symbol, stop_event)
+        if stop_event.is_set():
+            break
         time.sleep(RECONNECT_INTERVAL_SECONDS)
 
 

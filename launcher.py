@@ -48,6 +48,7 @@ TASK_DEFS = [
 TASK_LOCAL = threading.local()  # 任务线程上下文，线程
 
 SCHEDULE_REFRESH_SECONDS = 10  # 触发时间刷新间隔，秒
+WS_STATUS_STALE_SECONDS = 5  # WS状态超时，秒
 MAX_LOG_LINE_CHARS = 2000  # 单行日志最大长度，字符
 TASK_FREQUENCY = {
     "D10001": "每4小时",
@@ -259,10 +260,11 @@ def filter_tasks(tasks: list, selected: list) -> list:
 
 
 class ThreadLogWriter:
-    def __init__(self, thread_task_map: dict, logs: dict, pending: dict, error_logger):
+    def __init__(self, thread_task_map: dict, logs: dict, pending: dict, status_times: dict, error_logger):
         self.thread_task_map = thread_task_map
         self.logs = logs
         self.pending = pending
+        self.status_times = status_times
         self.error_logger = error_logger
 
     def write(self, text: str) -> None:
@@ -271,6 +273,7 @@ class ThreadLogWriter:
         task_id = self.thread_task_map.get(threading.get_ident()) or getattr(TASK_LOCAL, "task_id", None)
         if not task_id:
             return
+        self.status_times[task_id] = time.time()
         if "\r" in text:
             self.pending[task_id] = ""
             text = text.rsplit("\r", 1)[-1].lstrip()
@@ -323,13 +326,14 @@ class ErrorLogger:
             self.trace_remaining[task_id] = 200
 
 
-def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, dict]:
+def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, dict, dict]:
     tasks = filter_tasks(build_tasks(), selected or app_config.START_TASKS)
     if not tasks:
         print("未配置启动任务")
-        return [], {}, {}, {}, {}
+        return [], {}, {}, {}, {}, {}
     status_counts = {}
     status_times = {}
+    status_meta = {}
     logs = {}
     pending = {}
     thread_task_map = {}
@@ -339,7 +343,7 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
     error_logger = ErrorLogger(
         Path(app_config.ERROR_LOG_PATH), app_config.ERROR_LOG_KEYWORDS, app_config.ERROR_LOG_EXCLUDE_KEYWORDS
     )
-    writer = ThreadLogWriter(thread_task_map, logs, pending, error_logger)
+    writer = ThreadLogWriter(thread_task_map, logs, pending, status_times, error_logger)
     sys.stdout = writer
     sys.stderr = writer
     install_thread_task_inheritance(thread_task_map)
@@ -347,10 +351,13 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
     def make_hook(task_id: str):
         def hook(key: str, value) -> None:
             bucket = status_counts.setdefault(task_id, {})
+            meta = status_meta.setdefault(task_id, {})
             if value is None:
                 bucket.pop(key, None)
+                meta.pop(key, None)
             else:
                 bucket[key] = value
+                meta[key] = time.time()
             status_times[task_id] = time.time()
         return hook
 
@@ -358,16 +365,26 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
         def hook(message: str) -> None:
             logs[task_id].append(message)
             error_logger.write(task_id, message)
+            status_times[task_id] = time.time()
+            if "已写入:" in message:
+                bucket = status_counts.setdefault(task_id, {})
+                bucket["写入"] = int(bucket.get("写入") or 0) + 1
         return hook
 
     for task in tasks:
         task.start(thread_task_map, True, make_hook(task.task_id), make_log_hook(task.task_id))
-    return tasks, status_counts, status_times, logs, pending
+    return tasks, status_counts, status_times, status_meta, logs, pending
 
 
-def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
+def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pending) -> None:
     stdscr.nodelay(True)
     stdscr.keypad(True)
+    color_enabled = curses.has_colors()
+    if color_enabled:
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_RED, -1)
     selected = 0
     schedule_cache = {}
     last_schedule_ts = 0.0
@@ -429,7 +446,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                 stdscr.addstr(0, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
                 stdscr.addstr(1, log_col, truncate_by_cells(f"日志: {current.name}", max_cols - log_col - 1))
             status_lines = []
-            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10002-4", "D10006-8", "D10022-23"}:
+            ws_tasks = {"D10002-4", "D10006-8", "D10022-23"}
+            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10020", "D10021", "D10002-4", "D10006-8", "D10022-23"}:
                 counts = status_counts.get(current.task_id, {})
                 numeric_total = 0
                 for value in counts.values():
@@ -442,15 +460,23 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                     title = f"订阅计数（总计: {numeric_total}）"
                 elif current.task_id == "D10022-23":
                     title = "市场状态"
+                elif current.task_id in {"D10020", "D10021"}:
+                    title = "聚合状态"
                 else:
                     title = "下载状态"
                 status_lines.append(title)
                 for key in sorted(counts):
                     value = counts[key]
                     if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
-                        status_lines.append(f"{key}: {value[0]} {value[1]}")
+                        line_text = f"{key}: {value[0]} {value[1]}"
                     else:
-                        status_lines.append(f"{key}: {value}")
+                        line_text = f"{key}: {value}"
+                    if current.task_id in ws_tasks:
+                        last_ts = status_meta.get(current.task_id, {}).get(key)
+                        alive = bool(last_ts and (time.time() - last_ts) <= WS_STATUS_STALE_SECONDS)
+                        status_lines.append((line_text, alive))
+                    else:
+                        status_lines.append(line_text)
             if status_lines:
                 available = max_cols - log_col - 1
                 for idx, line in enumerate(status_lines):
@@ -459,7 +485,25 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                         break
                     if available <= 0:
                         break
-                    stdscr.addstr(target_row, log_col, truncate_by_cells(line, available))
+                    if isinstance(line, tuple):
+                        line_text, alive = line
+                        dot = "●"
+                        dot_width = cell_width(dot)
+                        text_col = log_col
+                        if available >= dot_width:
+                            if color_enabled:
+                                color_pair = curses.color_pair(1 if alive else 2)
+                                stdscr.addstr(target_row, text_col, dot, color_pair)
+                            else:
+                                stdscr.addstr(target_row, text_col, dot)
+                            if available >= dot_width + 1:
+                                stdscr.addstr(target_row, text_col + dot_width, " ")
+                                text_col = text_col + dot_width + 1
+                        text_available = max_cols - text_col - 1
+                        if text_available > 0:
+                            stdscr.addstr(target_row, text_col, truncate_by_cells(line_text, text_available))
+                    else:
+                        stdscr.addstr(target_row, log_col, truncate_by_cells(line, available))
                 log_start = log_start + len(status_lines) + 1
             visible_lines = max_rows - log_start - 1
             tail_lines = log_lines[-visible_lines:] if visible_lines > 0 else []
@@ -484,9 +528,9 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
 
 
 def main() -> None:
-    tasks, status_counts, status_times, logs, pending = start_tasks()
+    tasks, status_counts, status_times, status_meta, logs, pending = start_tasks()
     if tasks:
-        curses.wrapper(run_tui, tasks, status_counts, status_times, logs, pending)
+        curses.wrapper(run_tui, tasks, status_counts, status_times, status_meta, logs, pending)
         os._exit(0)
 
 

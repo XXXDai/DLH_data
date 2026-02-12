@@ -22,6 +22,7 @@ INSTRUMENTS_TIMEOUT_SECONDS = 10  # 交易对接口超时，秒
 INSTRUMENTS_LIMIT = 1000  # 交易对接口分页大小，条
 DELIVERY_CATEGORIES = app_config.BYBIT_FUTURE_DELIVERY_CATEGORIES  # 交割期货产品类型列表，个数
 DELIVERY_STATUSES = app_config.BYBIT_FUTURE_DELIVERY_STATUSES  # 交割期货状态列表，个数
+DELIVERY_EXCLUDE = app_config.BYBIT_FUTURE_DELIVERY_EXCLUDE  # 交割合约过滤列表，个数
 SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数
 START_DATE = app_config.D10013_START_DATE  # 起始日期（含），日期
 DATA_DIR = Path("data/src/bybit_future_trade_di")  # 保存目录，路径
@@ -30,12 +31,17 @@ RETRY_TIMES = 5  # 最大重试次数，次
 RETRY_INTERVAL_SECONDS = 5  # 重试间隔，秒
 CHUNK_SIZE = 1024 * 1024  # 下载块大小，字节
 LOOP_INTERVAL_SECONDS = 4 * 60 * 60  # 循环间隔，秒
+DELIVERY_REFRESH_SECONDS = 15 * 60  # 交割合约刷新间隔，秒
 INITIAL_BACKFILL_DAYS = 7  # 首次回填天数，天
 FAIL_LOG_DIR = Path("D10013")  # 失败记录目录，路径
 QUIET = False  # 静默模式开关，开关
 STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
 FAIL_LOCK = threading.Lock()  # 失败记录锁，锁
+DELIVERY_LOCK = threading.Lock()  # 交割合约锁，锁
+DELIVERY_TIMES = {}  # 交割合约到期映射，毫秒
+RUNNING_LOCK = threading.Lock()  # 运行线程锁，锁
+RUNNING_SYMBOLS = set()  # 运行中交易对集合，个数
 
 
 def log(message: str) -> None:
@@ -108,13 +114,8 @@ def iter_dates(start_date: str, end_date: str):
 
 
 def request_json(url: str) -> dict:
-    try:
-        with urlopen(url, timeout=INSTRUMENTS_TIMEOUT_SECONDS) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise RuntimeError(f"接口请求失败: HTTP {exc.code}") from exc
-    except URLError as exc:
-        raise RuntimeError("接口请求失败: 网络错误") from exc
+    with urlopen(url, timeout=INSTRUMENTS_TIMEOUT_SECONDS) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def build_instruments_url(category: str, status: str, cursor: str | None) -> str:
@@ -128,10 +129,10 @@ def build_instruments_url(category: str, status: str, cursor: str | None) -> str
     return f"{INSTRUMENTS_BASE_URL}?{urlencode(params)}"
 
 
-def list_delivery_symbols(start_date: str) -> list:
+def list_delivery_symbols(start_date: str) -> dict:
     start_ts = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     start_ms = int(start_ts.timestamp() * 1000)
-    symbols = set()
+    symbols = {}
     for category in DELIVERY_CATEGORIES:
         for status in DELIVERY_STATUSES:
             cursor = None
@@ -139,7 +140,8 @@ def list_delivery_symbols(start_date: str) -> list:
                 url = build_instruments_url(category, status, cursor)
                 payload = request_json(url)
                 if payload.get("retCode") != 0:
-                    raise RuntimeError(f"接口返回错误: {payload.get('retMsg')}")
+                    log(f"接口返回错误: {payload.get('retMsg')}")
+                    break
                 result = payload.get("result", {})
                 items = result.get("list", [])
                 for item in items:
@@ -147,15 +149,47 @@ def list_delivery_symbols(start_date: str) -> list:
                     if "Futures" not in contract_type and "Perpetual" not in contract_type:
                         continue
                     delivery_time = int(item.get("deliveryTime", "0") or 0)
+                    if delivery_time == 0:
+                        continue
                     if delivery_time != 0 and delivery_time < start_ms:
                         continue
                     symbol = item.get("symbol")
-                    if symbol:
-                        symbols.add(symbol)
+                    if symbol and not symbol.endswith("USDT"):
+                        continue
+                    if symbol and symbol not in DELIVERY_EXCLUDE:
+                        symbols[symbol] = delivery_time
                 cursor = result.get("nextPageCursor")
                 if not cursor:
                     break
-    return sorted(symbols)
+    return symbols
+
+
+def set_delivery_times(times: dict) -> None:
+    global DELIVERY_TIMES
+    with DELIVERY_LOCK:
+        DELIVERY_TIMES = dict(times)
+
+
+def get_delivery_time(symbol: str) -> int | None:
+    with DELIVERY_LOCK:
+        return DELIVERY_TIMES.get(symbol)
+
+
+def get_delivery_end_date(symbol: str) -> str | None:
+    delivery_time = get_delivery_time(symbol)
+    if not delivery_time:
+        return None
+    return datetime.fromtimestamp(delivery_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def is_delivery_complete(symbol: str, delivery_end: str | None) -> bool:
+    if not delivery_end:
+        return False
+    now_date = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    if now_date <= delivery_end:
+        return False
+    latest_local = get_latest_local_date(symbol)
+    return bool(latest_local and latest_local >= delivery_end)
 
 
 def extract_symbol_from_url(url: str) -> str | None:
@@ -305,8 +339,17 @@ def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failu
     return True
 
 
-def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: Path, done_count: int) -> tuple[set, int]:
+def run_initial_range(
+    start_date: str,
+    symbol: str,
+    failures: list,
+    fail_path: Path,
+    done_count: int,
+    delivery_end: str | None,
+) -> tuple[set, int]:
     end_date = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    if delivery_end and delivery_end < end_date:
+        end_date = delivery_end
     dates = list(iter_dates(start_date, end_date))
     total_days = len(dates)
     log(f"总天数: {total_days}")
@@ -323,7 +366,14 @@ def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: P
     return attempted, done_count
 
 
-def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
+def retry_failures(
+    failures: list,
+    skip_urls: set,
+    symbol: str,
+    fail_path: Path,
+    done_count: int,
+    delivery_end: str | None,
+) -> int:
     if not failures:
         return done_count
     log(f"失败重试数: {len(failures)}")
@@ -337,6 +387,8 @@ def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path,
         if url in skip_urls:
             continue
         date_str = item.get("日期") or "未知日期"
+        if delivery_end and date_str != "未知日期" and date_str > delivery_end:
+            continue
         file_name = Path(urlparse(url).path).name
         status_update(symbol, done_count, f"重试 {date_str} {file_name}")
         if download_by_url(url, date_str, symbol, fail_path, failures):
@@ -345,8 +397,18 @@ def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path,
     return done_count
 
 
-def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
+def download_today(
+    failures: list,
+    skip_urls: set,
+    symbol: str,
+    fail_path: Path,
+    done_count: int,
+    delivery_end: str | None,
+) -> int:
     date_str = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    if delivery_end and date_str > delivery_end:
+        log(f"交割合约已到期，停止今日下载: {symbol} {delivery_end}")
+        return done_count
     log(f"当前日期下载: {date_str}（UTC）")
     url = build_url(BASE_URL, symbol, date_str)
     file_name = Path(urlparse(url).path).name
@@ -375,6 +437,7 @@ def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path,
 def run_symbol(symbol: str) -> None:
     fail_path = build_fail_log_path()
     failures = load_failures(fail_path)
+    delivery_end = get_delivery_end_date(symbol)
     latest_local = get_latest_local_date(symbol)
     if latest_local:
         start_date = next_date(latest_local)
@@ -382,27 +445,80 @@ def run_symbol(symbol: str) -> None:
         backfill_days = max(1, INITIAL_BACKFILL_DAYS)
         backfill_start = (datetime.now(tz=timezone.utc) - timedelta(days=backfill_days - 1)).strftime("%Y-%m-%d")
         start_date = max(START_DATE, backfill_start)
+        if delivery_end:
+            start_date = START_DATE
     done_count = 0
-    skip_urls, done_count = run_initial_range(start_date, symbol, failures, fail_path, done_count)
+    skip_urls, done_count = run_initial_range(
+        start_date, symbol, failures, fail_path, done_count, delivery_end
+    )
+    if is_delivery_complete(symbol, delivery_end):
+        log(f"交割合约已到期，停止循环: {symbol} {delivery_end}")
+        return
     while True:
         failures = load_failures(fail_path)
-        done_count = retry_failures(failures, skip_urls, symbol, fail_path, done_count)
-        done_count = download_today(failures, skip_urls, symbol, fail_path, done_count)
+        delivery_end = get_delivery_end_date(symbol)
+        done_count = retry_failures(
+            failures, skip_urls, symbol, fail_path, done_count, delivery_end
+        )
+        done_count = download_today(
+            failures, skip_urls, symbol, fail_path, done_count, delivery_end
+        )
+        if is_delivery_complete(symbol, delivery_end):
+            log(f"交割合约已到期，停止循环: {symbol} {delivery_end}")
+            return
         skip_urls = set()
         sleep_seconds = seconds_until_next_utc_midnight()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
         time.sleep(sleep_seconds)
 
 
+def start_symbol_thread(symbol: str, threads: list) -> None:
+    thread = threading.Thread(target=run_symbol, args=(symbol,))
+    thread.start()
+    threads.append(thread)
+    RUNNING_SYMBOLS.add(symbol)
+
+
+def refresh_delivery_loop(start_date: str, threads: list) -> None:
+    while True:
+        try:
+            delivery_map = list_delivery_symbols(start_date)
+        except HTTPError as exc:
+            log(f"交割合约获取失败，HTTP错误: {exc}")
+            time.sleep(DELIVERY_REFRESH_SECONDS)
+            continue
+        except URLError as exc:
+            log(f"交割合约获取失败，网络错误: {exc}")
+            time.sleep(DELIVERY_REFRESH_SECONDS)
+            continue
+        set_delivery_times(delivery_map)
+        with RUNNING_LOCK:
+            new_symbols = sorted(set(delivery_map) - RUNNING_SYMBOLS)
+            for symbol in new_symbols:
+                start_symbol_thread(symbol, threads)
+        time.sleep(DELIVERY_REFRESH_SECONDS)
+
+
 def main() -> None:
-    threads = []
-    if not SYMBOLS:
+    delivery_map = {}
+    try:
+        delivery_map = list_delivery_symbols(START_DATE)
+    except HTTPError as exc:
+        log(f"交割合约获取失败，HTTP错误: {exc}")
+    except URLError as exc:
+        log(f"交割合约获取失败，网络错误: {exc}")
+    set_delivery_times(delivery_map)
+    symbols = sorted(set(SYMBOLS) | set(delivery_map))
+    if not symbols:
         log("未配置交易对")
         return
-    for symbol in SYMBOLS:
-        thread = threading.Thread(target=run_symbol, args=(symbol,))
-        thread.start()
-        threads.append(thread)
+    threads = []
+    with RUNNING_LOCK:
+        for symbol in symbols:
+            start_symbol_thread(symbol, threads)
+    refresh_thread = threading.Thread(target=refresh_delivery_loop, args=(START_DATE, threads))
+    refresh_thread.start()
+    threads.append(refresh_thread)
     for thread in threads:
         thread.join()
 

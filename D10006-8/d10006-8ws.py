@@ -140,13 +140,13 @@ def run_once(symbol: str) -> None:
         ws = connect_ws()
         send_subscribe(ws, topic)
     except websocket.WebSocketException as exc:
-        log(f"连接异常，准备重连: {exc}")
+        log(f"连接异常，准备重连: {exc} {symbol}")
         return
     except TimeoutError as exc:
-        log(f"连接超时，准备重连: {exc}")
+        log(f"连接超时，准备重连: {exc} {symbol}")
         return
     except OSError as exc:
-        log(f"网络错误，准备重连: {exc}")
+        log(f"网络错误，准备重连: {exc} {symbol}")
         return
     rt_writer = None
     rt_ss_writer = None
@@ -161,13 +161,13 @@ def run_once(symbol: str) -> None:
         try:
             raw = ws.recv()
         except websocket.WebSocketException as exc:
-            log(f"连接异常，准备重连: {exc}")
+            log(f"连接异常，准备重连: {exc} {symbol}")
             break
         except TimeoutError as exc:
-            log(f"连接超时，准备重连: {exc}")
+            log(f"连接超时，准备重连: {exc} {symbol}")
             break
         except OSError as exc:
-            log(f"网络错误，准备重连: {exc}")
+            log(f"网络错误，准备重连: {exc} {symbol}")
             break
         recv_count += 1
         now_ts = time.monotonic()

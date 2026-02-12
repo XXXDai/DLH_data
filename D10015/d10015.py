@@ -28,6 +28,16 @@ def log(message: str) -> None:
         print(message)
 
 
+def list_input_symbols(base_dir: Path) -> list:
+    if not base_dir.exists():
+        return []
+    return sorted([path.name for path in base_dir.iterdir() if path.is_dir()])
+
+
+def resolve_symbols() -> list:
+    return sorted(set(SYMBOLS) | set(list_input_symbols(INPUT_DIR)))
+
+
 def seconds_until_next_utc_midnight() -> int:
     now = datetime.now(tz=timezone.utc)
     next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -194,12 +204,13 @@ def iter_available_dates(symbol: str) -> list:
 
 
 def main() -> None:
-    if not SYMBOLS:
-        log("未配置交易对")
-        return
     align_to_utc_4h_boundary()
     while True:
-        for symbol in SYMBOLS:
+        symbols = resolve_symbols()
+        if not symbols:
+            log("未配置交易对")
+            return
+        for symbol in symbols:
             for date_str in iter_available_dates(symbol):
                 process_date(symbol, date_str)
         sleep_seconds = seconds_until_next_utc_4h()

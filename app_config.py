@@ -6,6 +6,7 @@ BYBIT_INSURANCE_COINS = ["USDT"]  # 保险基金币种列表，个数
 BYBIT_ONCHAIN_COINS = []  # 链上理财币种过滤列表，个数
 BYBIT_FUTURE_DELIVERY_CATEGORIES = ["linear"]  # 交割期货产品类型列表，个数
 BYBIT_FUTURE_DELIVERY_STATUSES = ["Trading", "PreLaunch", "Delivering", "Closed"]  # 交割期货状态列表，个数
+BYBIT_FUTURE_DELIVERY_EXCLUDE = ["MNTUSDT"]  # 交割合约过滤列表，个数
 POLYMARKET_EVENT_TEMPLATES = [
     "https://polymarket.com/event/{name}-up-or-down-on-{month}-{day}",
     "https://polymarket.com/event/{symbol}-updown-4h-{epoch_4h}",
