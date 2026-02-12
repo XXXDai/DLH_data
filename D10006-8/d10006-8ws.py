@@ -174,8 +174,6 @@ def run_once(symbol: str) -> None:
         if now_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
             if STATUS_HOOK:
                 STATUS_HOOK(symbol, recv_count)
-            if LOG_HOOK:
-                LOG_HOOK(f"已接收数量: {recv_count}")
             if not QUIET:
                 print(f"\r已接收数量: {recv_count}", end="", flush=True)
             last_status_ts = now_ts

@@ -400,6 +400,23 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                 schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text}"
                 stdscr.addstr(0, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
                 stdscr.addstr(1, log_col, truncate_by_cells(f"日志: {current.name}", max_cols - log_col - 1))
+            status_lines = []
+            if current.task_id in {"D10002-4", "D10006-8"}:
+                counts = status_counts.get(current.task_id, {})
+                total = sum(counts.values()) if counts else 0
+                status_lines.append(f"订阅计数（总计: {total}）")
+                for key in sorted(counts):
+                    status_lines.append(f"{key}: {counts[key]}")
+            if status_lines:
+                available = max_cols - log_col - 1
+                for idx, line in enumerate(status_lines):
+                    target_row = log_start + idx
+                    if target_row >= max_rows:
+                        break
+                    if available <= 0:
+                        break
+                    stdscr.addstr(target_row, log_col, truncate_by_cells(line, available))
+                log_start = log_start + len(status_lines) + 1
             visible_lines = max_rows - log_start - 1
             tail_lines = log_lines[-visible_lines:] if visible_lines > 0 else []
             for idx, line in enumerate(tail_lines):

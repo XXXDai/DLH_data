@@ -251,8 +251,9 @@ def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: P
     log(f"总天数: {total_days}")
     attempted = set()
     for idx, date_str in enumerate(dates, 1):
-        log(f"日期进度: {idx}/{total_days} {date_str}")
         url = build_url(BASE_URL, symbol, date_str)
+        file_name = Path(urlparse(url).path).name
+        log(f"日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
         attempted.add(url)
         download_by_url(url, date_str, symbol, fail_path, failures)
     return attempted

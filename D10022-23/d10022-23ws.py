@@ -5,6 +5,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import importlib
 import json
+import socket
 import sys
 import threading
 import time
@@ -312,6 +313,12 @@ def load_asset_ids(event_url: str, asset_tag: str, template: str) -> list:
         return []
     except URLError as exc:
         log(f"事件请求失败，网络错误: {exc} {event_url}")
+        return []
+    except TimeoutError as exc:
+        log(f"事件请求失败，超时: {exc} {event_url}")
+        return []
+    except socket.timeout as exc:
+        log(f"事件请求失败，超时: {exc} {event_url}")
         return []
     asset_ids = extract_asset_ids(event)
     if not asset_ids:
