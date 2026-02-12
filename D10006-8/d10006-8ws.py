@@ -25,6 +25,7 @@ TIMEOUT_SECONDS = 10  # 连接超时，秒
 RECV_TIMEOUT_SECONDS = 30  # 接收超时，秒
 RECONNECT_INTERVAL_SECONDS = 5  # 重连间隔，秒
 STATUS_INTERVAL_SECONDS = 1  # 状态输出间隔，秒
+PING_INTERVAL_SECONDS = 10  # 心跳间隔，秒
 QUIET = bool(globals().get("QUIET", False))  # 静默模式开关，开关
 STATUS_HOOK = globals().get("STATUS_HOOK")  # 状态回调函数，函数
 LOG_HOOK = globals().get("LOG_HOOK")  # 日志回调函数，函数
@@ -151,12 +152,33 @@ def run_once(symbol: str) -> None:
     rt_writer = None
     rt_ss_writer = None
     rt_ss_1s_writer = None
-    recv_count = 0
-    last_status_ts = time.monotonic()
+    recv_count = [0]
+    last_status_ts = [time.monotonic()]
     orderbook = {"bids": {}, "asks": {}}
     has_snapshot = False
     last_second = None
     last_snapshot = None
+    def keepalive():
+        while True:
+            time.sleep(PING_INTERVAL_SECONDS)
+            try:
+                ws.send(json.dumps({"op": "ping"}, ensure_ascii=True, separators=(",", ":")))
+            except websocket.WebSocketException:
+                break
+            except TimeoutError:
+                break
+            except OSError:
+                break
+            now_ts = time.monotonic()
+            if now_ts - last_status_ts[0] >= STATUS_INTERVAL_SECONDS:
+                if STATUS_HOOK:
+                    STATUS_HOOK(symbol, recv_count[0])
+                if not QUIET:
+                    print(f"\r已接收数量: {recv_count[0]}", end="", flush=True)
+                last_status_ts[0] = now_ts
+
+    keepalive_thread = threading.Thread(target=keepalive, daemon=True)
+    keepalive_thread.start()
     while True:
         try:
             raw = ws.recv()
@@ -169,14 +191,14 @@ def run_once(symbol: str) -> None:
         except OSError as exc:
             log(f"网络错误，准备重连: {exc} {symbol}")
             break
-        recv_count += 1
+        recv_count[0] += 1
         now_ts = time.monotonic()
-        if now_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
+        if now_ts - last_status_ts[0] >= STATUS_INTERVAL_SECONDS:
             if STATUS_HOOK:
-                STATUS_HOOK(symbol, recv_count)
+                STATUS_HOOK(symbol, recv_count[0])
             if not QUIET:
-                print(f"\r已接收数量: {recv_count}", end="", flush=True)
-            last_status_ts = now_ts
+                print(f"\r已接收数量: {recv_count[0]}", end="", flush=True)
+            last_status_ts[0] = now_ts
         collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
         msg = json.loads(raw)
         if "topic" not in msg:
