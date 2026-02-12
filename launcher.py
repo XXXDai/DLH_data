@@ -328,7 +328,11 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
 
     def make_hook(task_id: str):
         def hook(key: str, value) -> None:
-            status_counts.setdefault(task_id, {})[key] = value
+            bucket = status_counts.setdefault(task_id, {})
+            if value is None:
+                bucket.pop(key, None)
+            else:
+                bucket[key] = value
             status_times[task_id] = time.time()
         return hook
 
@@ -401,10 +405,15 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                 stdscr.addstr(0, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
                 stdscr.addstr(1, log_col, truncate_by_cells(f"日志: {current.name}", max_cols - log_col - 1))
             status_lines = []
-            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10002-4", "D10006-8"}:
+            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10002-4", "D10006-8", "D10022-23"}:
                 counts = status_counts.get(current.task_id, {})
                 numeric_total = sum(value for value in counts.values() if isinstance(value, (int, float)))
-                title = f"订阅计数（总计: {numeric_total}）" if current.task_id in {"D10002-4", "D10006-8"} else "下载状态"
+                if current.task_id in {"D10002-4", "D10006-8"}:
+                    title = f"订阅计数（总计: {numeric_total}）"
+                elif current.task_id == "D10022-23":
+                    title = "市场状态"
+                else:
+                    title = "下载状态"
                 status_lines.append(title)
                 for key in sorted(counts):
                     status_lines.append(f"{key}: {counts[key]}")

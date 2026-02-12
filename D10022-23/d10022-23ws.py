@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from http.client import IncompleteRead, RemoteDisconnected
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
@@ -31,6 +32,9 @@ RECV_TIMEOUT_SECONDS = 30  # 接收超时，秒
 RECONNECT_INTERVAL_SECONDS = 5  # 重连间隔，秒
 STATUS_INTERVAL_SECONDS = 1  # 状态输出间隔，秒
 PING_INTERVAL_SECONDS = 10  # 心跳间隔，秒
+PRECONNECT_LEAD_SECONDS = 60  # 预连接提前量，秒
+BECOME_ACTIVE_AFTER_SECONDS = 90  # 预连接最大等待，秒
+SCHEDULER_TICK_SECONDS = 1  # 调度循环间隔，秒
 BATCH_SIZE = 2000  # 单文件最大记录数，条
 QUIET = bool(globals().get("QUIET", False))  # 静默模式开关，开关
 STATUS_HOOK = globals().get("STATUS_HOOK")  # 状态回调函数，函数
@@ -57,8 +61,8 @@ def floor_et_epoch(now: datetime, seconds: int) -> int:
     return int(target.timestamp())
 
 
-def build_event_url(template: str, name: str, symbol: str) -> str:
-    now = datetime.now(tz=ZoneInfo(TIMEZONE_NAME))
+def build_event_url_at(template: str, name: str, symbol: str, now: datetime) -> str:
+    now = now.astimezone(ZoneInfo(TIMEZONE_NAME))
     month = now.strftime("%B").lower()
     day = str(int(now.strftime("%d")))
     hour12 = str(int(now.strftime("%I")))
@@ -75,6 +79,54 @@ def build_event_url(template: str, name: str, symbol: str) -> str:
         "epoch_5m": str(floor_et_epoch(now, 5 * 60)),
     }
     return template.format(**context)
+
+
+def build_event_url(template: str, name: str, symbol: str) -> str:
+    now = datetime.now(tz=ZoneInfo(TIMEZONE_NAME))
+    return build_event_url_at(template, name, symbol, now)
+
+
+def template_period_seconds(template: str) -> int:
+    if "{epoch_5m}" in template:
+        return 5 * 60
+    if "{epoch_15m}" in template:
+        return 15 * 60
+    if "{epoch_4h}" in template:
+        return 4 * 60 * 60
+    if "{hour12}" in template and "{ampm}" in template:
+        return 60 * 60
+    return 24 * 60 * 60
+
+
+def template_label(template: str) -> str:
+    if "{epoch_5m}" in template:
+        return "5m"
+    if "{epoch_15m}" in template:
+        return "15m"
+    if "{epoch_4h}" in template:
+        return "4h"
+    if "{hour12}" in template and "{ampm}" in template:
+        return "1h"
+    return "1d"
+
+
+def compute_period_bounds_utc(template: str, now_utc: datetime) -> tuple[int, int]:
+    tz = ZoneInfo(TIMEZONE_NAME)
+    if "{epoch_5m}" in template or "{epoch_15m}" in template or "{epoch_4h}" in template:
+        period_seconds = template_period_seconds(template)
+        now_local = now_utc.astimezone(tz)
+        current_ts = floor_et_epoch(now_local, period_seconds)
+        return current_ts, current_ts + period_seconds
+    if "{hour12}" in template and "{ampm}" in template:
+        now_ts = int(now_utc.timestamp())
+        current_ts = (now_ts // 3600) * 3600
+        return current_ts, current_ts + 3600
+    now_local = now_utc.astimezone(tz)
+    today = now_local.date()
+    current_local_midnight = datetime(today.year, today.month, today.day, tzinfo=tz)
+    tomorrow = today + timedelta(days=1)
+    next_local_midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=tz)
+    return int(current_local_midnight.timestamp()), int(next_local_midnight.timestamp())
 
 
 def parse_asset_tag(text: str) -> tuple[str, str, bool]:
@@ -340,11 +392,20 @@ def load_asset_ids(event_url: str, asset_tag: str, template: str) -> list:
     except URLError as exc:
         log(f"事件请求失败，网络错误: {exc} {event_url}")
         return []
+    except RemoteDisconnected as exc:
+        log(f"事件请求失败，网络错误: {exc} {event_url}")
+        return []
+    except IncompleteRead as exc:
+        log(f"事件请求失败，网络错误: {exc} {event_url}")
+        return []
     except TimeoutError as exc:
         log(f"事件请求失败，超时: {exc} {event_url}")
         return []
     except socket.timeout as exc:
         log(f"事件请求失败，超时: {exc} {event_url}")
+        return []
+    except json.JSONDecodeError as exc:
+        log(f"事件请求失败，返回格式错误: {exc} {event_url}")
         return []
     asset_ids = extract_asset_ids(event)
     if not asset_ids:
@@ -352,105 +413,247 @@ def load_asset_ids(event_url: str, asset_tag: str, template: str) -> list:
     return asset_ids
 
 
-def run_once(asset_ids: list, event_key: str) -> None:
-    try:
-        ws = connect_ws()
-        send_subscribe(ws, asset_ids)
-    except websocket.WebSocketException as exc:
-        log(f"连接异常，准备重连: {exc}")
-        return
-    except TimeoutError as exc:
-        log(f"连接超时，准备重连: {exc}")
-        return
-    except OSError as exc:
-        log(f"网络错误，准备重连: {exc}")
-        return
-    stop_event = threading.Event()
-
-    def keepalive():
-        while not stop_event.is_set():
-            time.sleep(PING_INTERVAL_SECONDS)
-            try:
-                ws.send("PING")
-            except websocket.WebSocketException:
-                break
-            except TimeoutError:
-                break
-            except OSError:
-                break
-    keepalive_thread = threading.Thread(target=keepalive, daemon=True)
-    keepalive_thread.start()
+def run_stream(
+    asset_ids: list,
+    event_url: str,
+    status_key: str,
+    stop_event: threading.Event,
+    active_event: threading.Event,
+    ready_event: threading.Event,
+) -> None:
+    slug = extract_slug(event_url)
     rt_writer = None
     rt_ss_writer = None
     recv_count = 0
+    base_count = None
     last_status_ts = time.monotonic()
     orderbooks = {}
-    while True:
+    while not stop_event.is_set():
         try:
-            raw = ws.recv()
+            ws = connect_ws()
+            send_subscribe(ws, asset_ids)
         except websocket.WebSocketException as exc:
-            log(f"连接异常，准备重连: {exc}")
-            break
+            log(f"连接异常，准备重连: {exc} {event_url}")
+            time.sleep(RECONNECT_INTERVAL_SECONDS)
+            continue
         except TimeoutError as exc:
-            log(f"连接超时，准备重连: {exc}")
-            break
+            log(f"连接超时，准备重连: {exc} {event_url}")
+            time.sleep(RECONNECT_INTERVAL_SECONDS)
+            continue
         except OSError as exc:
-            log(f"网络错误，准备重连: {exc}")
-            break
-        recv_count += 1
-        now_ts = time.monotonic()
-        if now_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
-            if STATUS_HOOK:
-                STATUS_HOOK(event_key, recv_count)
-            if not QUIET:
-                print(f"\r已接收数量: {recv_count}", end="", flush=True)
-            last_status_ts = now_ts
-        collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-        if not raw:
+            log(f"网络错误，准备重连: {exc} {event_url}")
+            time.sleep(RECONNECT_INTERVAL_SECONDS)
             continue
-        if isinstance(raw, str) and raw[:1] not in {"{", "["}:
-            continue
-        msg = json.loads(raw)
-        for payload in iter_payload(msg):
-            record = build_raw_record(payload, collect_ts)
-            if record:
+
+        def keepalive():
+            while not stop_event.is_set():
+                time.sleep(PING_INTERVAL_SECONDS)
+                try:
+                    ws.send("PING")
+                except websocket.WebSocketException:
+                    break
+                except TimeoutError:
+                    break
+                except OSError:
+                    break
+
+        keepalive_thread = threading.Thread(target=keepalive, daemon=True)
+        keepalive_thread.start()
+        while not stop_event.is_set():
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketException as exc:
+                log(f"连接异常，准备重连: {exc} {event_url}")
+                break
+            except TimeoutError as exc:
+                log(f"连接超时，准备重连: {exc} {event_url}")
+                break
+            except OSError as exc:
+                log(f"网络错误，准备重连: {exc} {event_url}")
+                break
+
+            recv_count += 1
+            now_ts = time.monotonic()
+            if now_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
+                if active_event.is_set():
+                    if base_count is None:
+                        base_count = recv_count
+                    if STATUS_HOOK:
+                        STATUS_HOOK(status_key, f"{recv_count - base_count} {slug}")
+                    if not QUIET:
+                        print(f"\r已接收数量: {recv_count - base_count}", end="", flush=True)
+                last_status_ts = now_ts
+
+            collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+            if not raw:
+                continue
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="ignore")
+            if isinstance(raw, str) and raw[:1] not in {"{", "["}:
+                continue
+            msg = json.loads(raw)
+            payloads = iter_payload(msg)
+            if payloads and not ready_event.is_set():
+                ready_event.set()
+            for payload in payloads:
+                record = build_raw_record(payload, collect_ts)
+                if record:
+                    hour_str = hour_str_from_ms(collect_ts)
+                    rt_writer = ensure_writer(RT_DIR, hour_str, RT_TAG, rt_writer)
+                    rt_writer["file"].write(
+                        json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
+                    )
+                    rt_writer["count"] += 1
+                event_type = payload.get("event_type") or payload.get("type")
+                if event_type not in {"book", "price_change"}:
+                    continue
+                symbol = extract_symbol(payload)
+                if not symbol:
+                    continue
+                orderbook = orderbooks.setdefault(symbol, {"bids": {}, "asks": {}})
+                updated = update_orderbook(orderbook, payload)
+                if not updated:
+                    continue
+                snapshot = build_snapshot(orderbook, payload, collect_ts)
+                if not snapshot:
+                    continue
                 hour_str = hour_str_from_ms(collect_ts)
-                rt_writer = ensure_writer(RT_DIR, hour_str, RT_TAG, rt_writer)
-                rt_writer["file"].write(
-                    json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
+                rt_ss_writer = ensure_writer(RT_SS_DIR, hour_str, RT_SS_TAG, rt_ss_writer)
+                rt_ss_writer["file"].write(
+                    json.dumps(snapshot, ensure_ascii=True, separators=(",", ":")) + "\n"
                 )
-                rt_writer["count"] += 1
-            event_type = payload.get("event_type") or payload.get("type")
-            if event_type not in {"book", "price_change"}:
-                continue
-            symbol = extract_symbol(payload)
-            if not symbol:
-                continue
-            orderbook = orderbooks.setdefault(symbol, {"bids": {}, "asks": {}})
-            updated = update_orderbook(orderbook, payload)
-            if not updated:
-                continue
-            snapshot = build_snapshot(orderbook, payload, collect_ts)
-            if not snapshot:
-                continue
-            hour_str = hour_str_from_ms(collect_ts)
-            rt_ss_writer = ensure_writer(RT_SS_DIR, hour_str, RT_SS_TAG, rt_ss_writer)
-            rt_ss_writer["file"].write(
-                json.dumps(snapshot, ensure_ascii=True, separators=(",", ":")) + "\n"
-            )
-            rt_ss_writer["count"] += 1
-    stop_event.set()
+                rt_ss_writer["count"] += 1
+
+        try:
+            ws.close()
+        except websocket.WebSocketException:
+            pass
+        except TimeoutError:
+            pass
+        except OSError:
+            pass
+        time.sleep(RECONNECT_INTERVAL_SECONDS)
     close_writer(rt_writer)
     close_writer(rt_ss_writer)
 
 
 def run_event_loop(asset_tag: str, template: str, name: str, symbol: str) -> None:
+    status_key = f"{symbol.upper()} {template_label(template)}"  # 状态键，字符串
+    current_url = None
+    current_stop = None
+    current_active = None
+    current_ready = None
+    current_thread = None
+    next_url = None
+    next_stop = None
+    next_active = None
+    next_ready = None
+    next_thread = None
+    next_started_ts = 0
+
     while True:
-        event_url = build_event_url(template, name, symbol)
-        asset_ids = load_asset_ids(event_url, asset_tag, template)
-        if asset_ids:
-            run_once(asset_ids, event_url)
-        time.sleep(RECONNECT_INTERVAL_SECONDS)
+        now_utc = datetime.now(tz=timezone.utc)
+        now_ts = int(now_utc.timestamp())
+        period_start_ts, period_next_ts = compute_period_bounds_utc(template, now_utc)
+        tz = ZoneInfo(TIMEZONE_NAME)
+        desired_url = build_event_url_at(
+            template, name, symbol, datetime.fromtimestamp(period_start_ts, tz=tz)
+        )
+        desired_next_url = build_event_url_at(
+            template, name, symbol, datetime.fromtimestamp(period_next_ts, tz=tz)
+        )
+
+        if current_thread and not current_thread.is_alive():
+            current_thread = None
+
+        if current_url is None:
+            current_url = desired_url
+
+        target_candidate_url = None
+        switch_when_ready = False
+        if current_url != desired_url:
+            target_candidate_url = desired_url
+            switch_when_ready = True
+        else:
+            seconds_to_next = period_next_ts - now_ts
+            if seconds_to_next <= PRECONNECT_LEAD_SECONDS or now_ts >= period_next_ts:
+                target_candidate_url = desired_next_url
+                switch_when_ready = now_ts >= period_next_ts
+
+        if next_thread and not next_thread.is_alive():
+            next_thread = None
+
+        if next_url and target_candidate_url != next_url:
+            if next_stop:
+                next_stop.set()
+            next_url = None
+            next_stop = None
+            next_active = None
+            next_ready = None
+            next_thread = None
+            next_started_ts = 0
+
+        if target_candidate_url and next_url is None:
+            asset_ids = load_asset_ids(target_candidate_url, asset_tag, template)
+            if asset_ids:
+                next_url = target_candidate_url
+                next_stop = threading.Event()
+                next_active = threading.Event()
+                next_ready = threading.Event()
+                next_started_ts = now_ts
+                next_thread = threading.Thread(
+                    target=run_stream,
+                    args=(asset_ids, next_url, status_key, next_stop, next_active, next_ready),
+                    daemon=True,
+                )
+                next_thread.start()
+
+        if current_thread is None:
+            asset_ids = load_asset_ids(current_url, asset_tag, template)
+            if asset_ids:
+                current_stop = threading.Event()
+                current_active = threading.Event()
+                current_ready = threading.Event()
+                current_active.set()
+                current_thread = threading.Thread(
+                    target=run_stream,
+                    args=(asset_ids, current_url, status_key, current_stop, current_active, current_ready),
+                    daemon=True,
+                )
+                current_thread.start()
+
+        if next_url and next_ready and next_ready.is_set():
+            if switch_when_ready or now_ts >= period_next_ts:
+                if next_active:
+                    next_active.set()
+                if current_active:
+                    current_active.clear()
+                if current_stop:
+                    current_stop.set()
+                current_url = next_url
+                current_stop = next_stop
+                current_active = next_active
+                current_ready = next_ready
+                current_thread = next_thread
+                next_url = None
+                next_stop = None
+                next_active = None
+                next_ready = None
+                next_thread = None
+                next_started_ts = 0
+
+        if next_url and next_ready and not next_ready.is_set():
+            if next_started_ts and now_ts - next_started_ts >= BECOME_ACTIVE_AFTER_SECONDS:
+                if next_stop:
+                    next_stop.set()
+                next_url = None
+                next_stop = None
+                next_active = None
+                next_ready = None
+                next_thread = None
+                next_started_ts = 0
+
+        time.sleep(SCHEDULER_TICK_SECONDS)
 
 
 def main() -> None:
