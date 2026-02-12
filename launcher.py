@@ -379,7 +379,13 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                 break
             status = "运行中" if task.is_running() else "已退出"
             counts = status_counts.get(task.task_id, {})
-            total_count = sum(value for value in counts.values() if isinstance(value, (int, float)))
+            total_count = 0
+            for value in counts.values():
+                if isinstance(value, (int, float)):
+                    total_count += value
+                    continue
+                if isinstance(value, tuple) and value and isinstance(value[0], (int, float)):
+                    total_count += value[0]
             last_ts = status_times.get(task.task_id)
             last_text = time.strftime("%H:%M:%S", time.localtime(last_ts)) if last_ts else "-"
             prefix = ">" if idx == selected else " "
@@ -407,7 +413,13 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
             status_lines = []
             if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10002-4", "D10006-8", "D10022-23"}:
                 counts = status_counts.get(current.task_id, {})
-                numeric_total = sum(value for value in counts.values() if isinstance(value, (int, float)))
+                numeric_total = 0
+                for value in counts.values():
+                    if isinstance(value, (int, float)):
+                        numeric_total += value
+                        continue
+                    if isinstance(value, tuple) and value and isinstance(value[0], (int, float)):
+                        numeric_total += value[0]
                 if current.task_id in {"D10002-4", "D10006-8"}:
                     title = f"订阅计数（总计: {numeric_total}）"
                 elif current.task_id == "D10022-23":
@@ -416,7 +428,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                     title = "下载状态"
                 status_lines.append(title)
                 for key in sorted(counts):
-                    status_lines.append(f"{key}: {counts[key]}")
+                    value = counts[key]
+                    if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
+                        status_lines.append(f"{key}: {value[0]} {value[1]}")
+                    else:
+                        status_lines.append(f"{key}: {value}")
             if status_lines:
                 available = max_cols - log_col - 1
                 for idx, line in enumerate(status_lines):

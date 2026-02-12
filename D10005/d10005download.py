@@ -40,9 +40,9 @@ def log(message: str) -> None:
     if not QUIET:
         print(message)
 
-def status_update(symbol: str, text: str) -> None:
+def status_update(symbol: str, done_count: int, text: str) -> None:
     if STATUS_HOOK:
-        STATUS_HOOK(symbol, text)
+        STATUS_HOOK(symbol, (done_count, text))
 
 
 def seconds_until_next_utc_midnight() -> int:
@@ -224,12 +224,12 @@ def update_failures_file(path: Path, record: dict | None, url: str) -> list:
         return failures
 
 
-def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failures: list) -> None:
+def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failures: list) -> bool:
     dest_path = resolve_output_path(url, DATA_DIR)
     if dest_path.exists() and zipfile.is_zipfile(dest_path):
         failures[:] = update_failures_file(fail_path, None, url)
         log(f"已存在，跳过下载: {dest_path}")
-        return
+        return False
     size, error_message = download_file(url, dest_path)
     if size is None:
         record = {
@@ -242,12 +242,13 @@ def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failu
         }
         failures[:] = update_failures_file(fail_path, record, url)
         log(f"下载失败已记录: {date_str}")
-        return
+        return False
     failures[:] = update_failures_file(fail_path, None, url)
     log(f"已下载: {dest_path}，大小: {size} 字节")
+    return True
 
 
-def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: Path) -> set:
+def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: Path, done_count: int) -> tuple[set, int]:
     end_date = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     dates = list(iter_dates(start_date, end_date))
     total_days = len(dates)
@@ -257,15 +258,17 @@ def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: P
         url = build_url(BASE_URL, symbol, date_str)
         file_name = Path(urlparse(url).path).name
         log(f"日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
-        status_update(symbol, f"{idx}/{total_days} {date_str} {file_name}")
+        status_update(symbol, done_count, f"{idx}/{total_days} {date_str} {file_name}")
         attempted.add(url)
-        download_by_url(url, date_str, symbol, fail_path, failures)
-    return attempted
+        if download_by_url(url, date_str, symbol, fail_path, failures):
+            done_count += 1
+            status_update(symbol, done_count, f"{idx}/{total_days} {date_str} {file_name}")
+    return attempted, done_count
 
 
-def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path) -> None:
+def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
     if not failures:
-        return
+        return done_count
     log(f"失败重试数: {len(failures)}")
     for item in list(failures):
         url = item.get("url")
@@ -277,21 +280,26 @@ def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path)
         if url in skip_urls:
             continue
         date_str = item.get("日期") or "未知日期"
-        status_update(symbol, f"重试 {date_str} {Path(urlparse(url).path).name}")
-        download_by_url(url, date_str, symbol, fail_path, failures)
+        file_name = Path(urlparse(url).path).name
+        status_update(symbol, done_count, f"重试 {date_str} {file_name}")
+        if download_by_url(url, date_str, symbol, fail_path, failures):
+            done_count += 1
+            status_update(symbol, done_count, f"重试 {date_str} {file_name}")
+    return done_count
 
 
-def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path) -> None:
+def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
     date_str = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     log(f"当前日期下载: {date_str}（UTC）")
     url = build_url(BASE_URL, symbol, date_str)
-    status_update(symbol, f"今日 {date_str} {Path(urlparse(url).path).name}")
+    file_name = Path(urlparse(url).path).name
+    status_update(symbol, done_count, f"今日 {date_str} {file_name}")
     if url in skip_urls:
         log("今日数据已在本轮尝试中，跳过重复请求")
-        return
+        return done_count
     if has_failure(failures, url):
         log("今日数据已在失败列表中，本轮跳过重复请求")
-        return
+        return done_count
     dest_path = resolve_output_path(url, DATA_DIR)
     if dest_path.exists():
         if not zipfile.is_zipfile(dest_path):
@@ -300,8 +308,11 @@ def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path)
         else:
             log(f"已存在，跳过今日下载: {dest_path}")
             failures[:] = update_failures_file(fail_path, None, url)
-            return
-    download_by_url(url, date_str, symbol, fail_path, failures)
+            return done_count
+    if download_by_url(url, date_str, symbol, fail_path, failures):
+        done_count += 1
+        status_update(symbol, done_count, f"今日 {date_str} {file_name}")
+    return done_count
 
 
 def run_symbol(symbol: str) -> None:
@@ -313,11 +324,12 @@ def run_symbol(symbol: str) -> None:
     else:
         backfill_start = (datetime.now(tz=timezone.utc) - timedelta(days=INITIAL_BACKFILL_DAYS)).strftime("%Y-%m-%d")
         start_date = max(START_DATE, backfill_start)
-    skip_urls = run_initial_range(start_date, symbol, failures, fail_path)
+    done_count = 0
+    skip_urls, done_count = run_initial_range(start_date, symbol, failures, fail_path, done_count)
     while True:
         failures = load_failures(fail_path)
-        retry_failures(failures, skip_urls, symbol, fail_path)
-        download_today(failures, skip_urls, symbol, fail_path)
+        done_count = retry_failures(failures, skip_urls, symbol, fail_path, done_count)
+        done_count = download_today(failures, skip_urls, symbol, fail_path, done_count)
         skip_urls = set()
         sleep_seconds = seconds_until_next_utc_midnight()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")

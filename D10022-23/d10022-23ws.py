@@ -479,7 +479,7 @@ def run_stream(
                     if base_count is None:
                         base_count = recv_count
                     if STATUS_HOOK:
-                        STATUS_HOOK(status_key, f"{recv_count - base_count} {slug}")
+                        STATUS_HOOK(status_key, (recv_count - base_count, slug))
                     if not QUIET:
                         print(f"\r已接收数量: {recv_count - base_count}", end="", flush=True)
                 last_status_ts = now_ts
