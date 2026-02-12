@@ -17,9 +17,12 @@ LIMIT = 200  # 每页数量，条
 TIMEOUT_SECONDS = 10  # 请求超时，秒
 DATA_DIR = Path("data/src/bybit_future_fundingrate_di")  # 保存目录，路径
 QUIET = False  # 静默模式开关，开关
+LOG_HOOK = None  # 日志回调函数，函数
 
 
 def log(message: str) -> None:
+    if LOG_HOOK:
+        LOG_HOOK(message)
     if not QUIET:
         print(message)
 

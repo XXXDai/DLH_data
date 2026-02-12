@@ -21,9 +21,13 @@ CHUNK_SIZE = 1024 * 1024  # 下载块大小，字节
 LOOP_INTERVAL_SECONDS = 4 * 60 * 60  # 循环间隔，秒
 FAIL_LOG_DIR = Path("D10005")  # 失败记录目录，路径
 QUIET = False  # 静默模式开关，开关
+LOG_HOOK = None  # 日志回调函数，函数
+FAIL_LOCK = threading.Lock()  # 失败记录锁，锁
 
 
 def log(message: str) -> None:
+    if LOG_HOOK:
+        LOG_HOOK(message)
     if not QUIET:
         print(message)
 
@@ -97,6 +101,11 @@ def download_file(url: str, dest_path: Path) -> tuple[int | None, str | None]:
 
 
 def load_failures(path: Path) -> list:
+    with FAIL_LOCK:
+        return load_failures_unlocked(path)
+
+
+def load_failures_unlocked(path: Path) -> list:
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8") as f:
@@ -105,6 +114,11 @@ def load_failures(path: Path) -> list:
 
 
 def save_failures(path: Path, failures: list) -> None:
+    with FAIL_LOCK:
+        save_failures_unlocked(path, failures)
+
+
+def save_failures_unlocked(path: Path, failures: list) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(failures, f, ensure_ascii=False, indent=2)
 
@@ -125,24 +139,33 @@ def has_failure(failures: list, url: str) -> bool:
     return any(item.get("url") == url for item in failures)
 
 
-def download_by_url(url: str, date_str: str, symbol: str, failures: list) -> None:
+def update_failures_file(path: Path, record: dict | None, url: str) -> list:
+    with FAIL_LOCK:
+        failures = load_failures_unlocked(path)
+        if record is None:
+            remove_failure(failures, url)
+        else:
+            upsert_failure(failures, record)
+        save_failures_unlocked(path, failures)
+        return failures
+
+
+def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failures: list) -> None:
     dest_path = resolve_output_path(url, DATA_DIR)
     size, error_message = download_file(url, dest_path)
     if size is None:
-        upsert_failure(
-            failures,
-            {
-                "日期": date_str,
-                "交易对": symbol,
-                "url": url,
-                "错误信息": error_message,
-                "重试次数": RETRY_TIMES,
-                "记录时间": datetime.now().isoformat(),
-            },
-        )
+        record = {
+            "日期": date_str,
+            "交易对": symbol,
+            "url": url,
+            "错误信息": error_message,
+            "重试次数": RETRY_TIMES,
+            "记录时间": datetime.now().isoformat(),
+        }
+        failures[:] = update_failures_file(fail_path, record, url)
         log(f"下载失败已记录: {date_str}")
         return
-    remove_failure(failures, url)
+    failures[:] = update_failures_file(fail_path, None, url)
     log(f"已下载: {dest_path}，大小: {size} 字节")
 
 
@@ -156,8 +179,7 @@ def run_initial_range(symbol: str, failures: list, fail_path: Path) -> set:
         log(f"日期进度: {idx}/{total_days} {date_str}")
         url = build_url(BASE_URL, symbol, date_str)
         attempted.add(url)
-        download_by_url(url, date_str, symbol, failures)
-        save_failures(fail_path, failures)
+        download_by_url(url, date_str, symbol, fail_path, failures)
     return attempted
 
 
@@ -172,8 +194,7 @@ def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path)
         if url in skip_urls:
             continue
         date_str = item.get("日期") or "未知日期"
-        download_by_url(url, date_str, symbol, failures)
-        save_failures(fail_path, failures)
+        download_by_url(url, date_str, symbol, fail_path, failures)
 
 
 def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path) -> None:
@@ -191,8 +212,7 @@ def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path)
         log(f"已存在，跳过今日下载: {dest_path}")
         remove_failure(failures, url)
         return
-    download_by_url(url, today, symbol, failures)
-    save_failures(fail_path, failures)
+    download_by_url(url, today, symbol, fail_path, failures)
 
 
 def run_symbol(symbol: str) -> None:

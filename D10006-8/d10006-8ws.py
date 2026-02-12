@@ -19,11 +19,14 @@ TIMEOUT_SECONDS = 10  # 连接超时，秒
 RECV_TIMEOUT_SECONDS = 30  # 接收超时，秒
 RECONNECT_INTERVAL_SECONDS = 5  # 重连间隔，秒
 STATUS_INTERVAL_SECONDS = 1  # 状态输出间隔，秒
-QUIET = False  # 静默模式开关，开关
-STATUS_HOOK = None  # 状态回调函数，函数
+QUIET = bool(globals().get("QUIET", False))  # 静默模式开关，开关
+STATUS_HOOK = globals().get("STATUS_HOOK")  # 状态回调函数，函数
+LOG_HOOK = globals().get("LOG_HOOK")  # 日志回调函数，函数
 
 
 def log(message: str) -> None:
+    if LOG_HOOK:
+        LOG_HOOK(message)
     if not QUIET:
         print(message)
 
@@ -165,6 +168,8 @@ def run_once(symbol: str) -> None:
         if now_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
             if STATUS_HOOK:
                 STATUS_HOOK(symbol, recv_count)
+            if LOG_HOOK:
+                LOG_HOOK(f"已接收数量: {recv_count}")
             if not QUIET:
                 print(f"\r已接收数量: {recv_count}", end="", flush=True)
             last_status_ts = now_ts

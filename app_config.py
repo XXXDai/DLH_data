@@ -30,6 +30,8 @@ D10017_START_DATE = "2026-02-10"  # D10017起始日期，日期
 START_TASKS = []  # 启动任务列表，个数
 TUI_REFRESH_SECONDS = 0.5  # TUI刷新间隔，秒
 LOG_LINES_PER_TASK = 20  # 每任务日志行数，行
+ERROR_LOG_PATH = "logs/error.log"  # 错误日志路径，路径
+ERROR_LOG_KEYWORDS = ["错误", "失败", "异常", "Traceback", "Exception"]  # 错误关键词列表，个数
 
 
 def parse_bybit_symbols(text: str) -> list:

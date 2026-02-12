@@ -7,6 +7,15 @@ import pyarrow.parquet as pq
 INPUT_DIR = Path("data/src/polymarket_orderbook_rt_ss")  # 输入目录，路径
 OUTPUT_DIR = Path("data/dws/dws_polymarket_orderbook_ss_1m_hi")  # 输出目录，路径
 START_HOUR = "2026-02-12 00:00"  # 起始小时，日期时间
+QUIET = False  # 静默模式开关，开关
+LOG_HOOK = None  # 日志回调函数，函数
+
+
+def log(message: str) -> None:
+    if LOG_HOOK:
+        LOG_HOOK(message)
+    if not QUIET:
+        print(message)
 
 
 def iter_hours(start_hour: str, end_hour: str):
@@ -21,7 +30,7 @@ def iter_hours(start_hour: str, end_hour: str):
 def list_input_files(hour_str: str) -> list:
     hour_dir = INPUT_DIR / hour_str
     if not hour_dir.exists():
-        print(f"目录不存在: {hour_dir}")
+        log(f"目录不存在: {hour_dir}")
         return []
     return sorted(hour_dir.glob(f"polymarket_orderbook_rt_ss-{hour_str}-batch_*.json"))
 
@@ -131,16 +140,19 @@ def process_hour(hour_str: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(output_records, schema=build_schema())
     pq.write_table(table, output_path, compression="snappy")
-    print(f"已写入: {output_path}，记录数: {len(output_records)}")
+    log(f"已写入: {output_path}，记录数: {len(output_records)}")
 
 
 def main() -> None:
     end_hour = datetime.now(tz=timezone.utc).replace(minute=0, second=0, microsecond=0)
     end_hour_str = end_hour.strftime("%Y-%m-%d %H:%M")
     for hour_str in iter_hours(START_HOUR, end_hour_str):
-        print(f"开始处理: {hour_str}")
+        log(f"开始处理: {hour_str}")
         process_hour(hour_str)
+
+def run() -> None:
+    main()
 
 
 if __name__ == "__main__":
-    main()
+    run()

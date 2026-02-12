@@ -9,6 +9,15 @@ INPUT_DIR = Path("data/src/bybit_future_trade_di")  # 输入目录，路径
 OUTPUT_DIR = Path("data/dws/dws_bybit_future_trade_1s_di")  # 输出目录，路径
 SYMBOL = "BTCUSDT"  # 交易对，字符串
 START_DATE = "2026-02-11"  # 起始日期（含），日期
+QUIET = False  # 静默模式开关，开关
+LOG_HOOK = None  # 日志回调函数，函数
+
+
+def log(message: str) -> None:
+    if LOG_HOOK:
+        LOG_HOOK(message)
+    if not QUIET:
+        print(message)
 
 
 def build_input_path(base_dir: Path, symbol: str, date_str: str) -> Path:
@@ -57,7 +66,7 @@ def write_parquet(records: list, writer: pq.ParquetWriter, schema: pa.Schema) ->
 def process_date(date_str: str) -> None:
     input_path = build_input_path(INPUT_DIR, SYMBOL, date_str)
     if not input_path.exists():
-        print(f"文件不存在: {input_path}")
+        log(f"文件不存在: {input_path}")
         return
     output_path = build_output_path(OUTPUT_DIR, SYMBOL, date_str)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,15 +119,18 @@ def process_date(date_str: str) -> None:
         )
         total += 1
     writer.close()
-    print(f"已写入: {output_path}，记录数: {total}")
+    log(f"已写入: {output_path}，记录数: {total}")
 
 
 def main() -> None:
     end_date = datetime.now().strftime("%Y-%m-%d")
     for date_str in iter_dates(START_DATE, end_date):
-        print(f"开始处理: {date_str}")
+        log(f"开始处理: {date_str}")
         process_date(date_str)
+
+def run() -> None:
+    main()
 
 
 if __name__ == "__main__":
-    main()
+    run()

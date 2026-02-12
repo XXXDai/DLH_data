@@ -3,3 +3,4 @@ __pycache__/
 .DS_Store
 data/
 doc/
+**/download_failures.json
