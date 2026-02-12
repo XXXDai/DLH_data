@@ -32,6 +32,8 @@ QUIET = False  # 静默模式开关，开关
 STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
 FAIL_LOCK = threading.Lock()  # 失败记录锁，锁
+ALIGN_LOCK = threading.Lock()  # 启动对齐锁，锁
+ALIGN_LOGGED = False  # 启动对齐日志标记，开关
 
 
 def log(message: str) -> None:
@@ -63,13 +65,20 @@ def seconds_until_next_utc_4h() -> int:
     return seconds if seconds > 0 else 1
 
 
-def align_to_utc_4h_boundary() -> None:
+def align_to_utc_4h_boundary(symbol: str, done_count: int) -> None:
     now = datetime.now(tz=timezone.utc)
     if now.hour % 4 == 0 and now.minute == 0 and now.second == 0:
+        status_update(symbol, done_count, "已对齐")
         return
     sleep_seconds = seconds_until_next_utc_4h()
-    log(f"启动对齐，等待 {sleep_seconds} 秒后执行（UTC 4小时倍数）")
+    status_update(symbol, done_count, f"对齐等待 {sleep_seconds}s")
+    global ALIGN_LOGGED
+    with ALIGN_LOCK:
+        if not ALIGN_LOGGED:
+            log(f"启动对齐，等待 {sleep_seconds} 秒后执行（UTC 4小时倍数）")
+            ALIGN_LOGGED = True
     time.sleep(sleep_seconds)
+    status_update(symbol, done_count, "已对齐")
 
 
 def build_fail_log_path() -> Path:
@@ -345,8 +354,8 @@ def run_symbol(symbol: str) -> None:
         backfill_start = (datetime.now(tz=timezone.utc) - timedelta(days=INITIAL_BACKFILL_DAYS)).strftime("%Y-%m-%d")
         start_date = max(START_DATE, backfill_start)
     done_count = 0
+    align_to_utc_4h_boundary(symbol, done_count)
     skip_urls, done_count = run_initial_range(start_date, symbol, failures, fail_path, done_count)
-    align_to_utc_4h_boundary()
     while True:
         failures = load_failures(fail_path)
         done_count = retry_failures(failures, skip_urls, symbol, fail_path, done_count)
