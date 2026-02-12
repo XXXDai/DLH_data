@@ -424,9 +424,9 @@ def run_stream(
     slug = extract_slug(event_url)
     rt_writer = None
     rt_ss_writer = None
-    recv_count = 0
-    base_count = None
-    last_status_ts = time.monotonic()
+    recv_count = [0]
+    base_count = [None]
+    last_status_ts = [time.monotonic()]
     orderbooks = {}
     while not stop_event.is_set():
         try:
@@ -456,6 +456,14 @@ def run_stream(
                     break
                 except OSError:
                     break
+                if active_event.is_set():
+                    now_ts = time.monotonic()
+                    if now_ts - last_status_ts[0] >= STATUS_INTERVAL_SECONDS:
+                        if base_count[0] is None:
+                            base_count[0] = recv_count[0]
+                        if STATUS_HOOK:
+                            STATUS_HOOK(status_key, (recv_count[0] - base_count[0], slug))
+                        last_status_ts[0] = now_ts
 
         keepalive_thread = threading.Thread(target=keepalive, daemon=True)
         keepalive_thread.start()
@@ -472,17 +480,17 @@ def run_stream(
                 log(f"{status_key} 网络错误，准备重连: {exc} {event_url}")
                 break
 
-            recv_count += 1
+            recv_count[0] += 1
             now_ts = time.monotonic()
-            if now_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
+            if now_ts - last_status_ts[0] >= STATUS_INTERVAL_SECONDS:
                 if active_event.is_set():
-                    if base_count is None:
-                        base_count = recv_count
+                    if base_count[0] is None:
+                        base_count[0] = recv_count[0]
                     if STATUS_HOOK:
-                        STATUS_HOOK(status_key, (recv_count - base_count, slug))
+                        STATUS_HOOK(status_key, (recv_count[0] - base_count[0], slug))
                     if not QUIET:
-                        print(f"\r已接收数量: {recv_count - base_count}", end="", flush=True)
-                last_status_ts = now_ts
+                        print(f"\r已接收数量: {recv_count[0] - base_count[0]}", end="", flush=True)
+                last_status_ts[0] = now_ts
 
             collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
             if not raw:
