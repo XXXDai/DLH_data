@@ -1,6 +1,6 @@
 BYBIT_SYMBOL = (
     "BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT, TRXUSDT, SUIUSDT, PEPEUSDT, HBARUSDT"
-    "AAVEUSDT, HYPEUSDT, ADAUSDT, BCHUSDT, ZECUSDT, LINKUSDT, LTCUSDT, UNIUSDT, SHIBUSDT, TONUSDT"
+    ", AAVEUSDT, HYPEUSDT, ADAUSDT, BCHUSDT, ZECUSDT, LINKUSDT, LTCUSDT, UNIUSDT, SHIBUSDT, TONUSDT"
 )  # Bybit交易对，字符串
 BYBIT_INSURANCE_COINS = ["USDT"]  # 保险基金币种列表，个数
 BYBIT_ONCHAIN_COINS = []  # 链上理财币种过滤列表，个数
@@ -17,7 +17,7 @@ POLYMARKET_ASSET_TAGS = [
     "bitcoin:btc:1",
     "ethereum:eth:0",
     "solana:sol:0",
-    "ripple:xrp:0",
+    "xrp:xrp:0",
 ]  # Polymarket资产映射列表，个数
 POLYMARKET_TZ_NAME = "America/New_York"  # Polymarket时区名称，时区
 
@@ -28,10 +28,11 @@ D10014_START_DATE = "2026-02-10"  # D10014起始日期，日期
 D10017_START_DATE = "2026-02-10"  # D10017起始日期，日期
 
 START_TASKS = []  # 启动任务列表，个数
-TUI_REFRESH_SECONDS = 0.5  # TUI刷新间隔，秒
-LOG_LINES_PER_TASK = 20  # 每任务日志行数，行
+TUI_REFRESH_SECONDS = 0.1  # TUI刷新间隔，秒
+LOG_LINES_PER_TASK = 50  # 每任务日志行数，行
 ERROR_LOG_PATH = "logs/error.log"  # 错误日志路径，路径
-ERROR_LOG_KEYWORDS = ["错误", "失败", "异常", "Traceback", "Exception"]  # 错误关键词列表，个数
+ERROR_LOG_KEYWORDS = ["错误", "异常", "Traceback", "Exception"]  # 错误关键词列表，个数
+ERROR_LOG_EXCLUDE_KEYWORDS = ["HTTP错误404", "HTTP Error 404"]  # 错误排除关键词列表，个数
 
 
 def parse_bybit_symbols(text: str) -> list:

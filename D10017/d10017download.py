@@ -1,12 +1,19 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import csv
 import json
+import importlib
 import threading
+import time
+import sys
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
-import app_config
+
+ROOT_DIR = Path(__file__).resolve().parents[1]  # 项目根目录，路径
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+app_config = importlib.import_module("app_config")  # 项目配置模块，模块
 
 BASE_URL = "https://api.bybit.com"  # API根地址，字符串
 ENDPOINT = "/v5/market/funding/history"  # 接口路径，字符串
@@ -16,6 +23,7 @@ START_DATE = app_config.D10017_START_DATE  # 起始日期（含），日期
 LIMIT = 200  # 每页数量，条
 TIMEOUT_SECONDS = 10  # 请求超时，秒
 DATA_DIR = Path("data/src/bybit_future_fundingrate_di")  # 保存目录，路径
+LOOP_INTERVAL_SECONDS = 4 * 60 * 60  # 循环间隔，秒
 QUIET = False  # 静默模式开关，开关
 LOG_HOOK = None  # 日志回调函数，函数
 
@@ -25,6 +33,13 @@ def log(message: str) -> None:
         LOG_HOOK(message)
     if not QUIET:
         print(message)
+
+
+def seconds_until_next_utc_midnight() -> int:
+    now = datetime.now(tz=timezone.utc)
+    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    seconds = int((next_midnight - now).total_seconds())
+    return seconds if seconds > 0 else 1
 
 
 def build_file_path(base_dir: Path, symbol: str) -> Path:
@@ -81,7 +96,11 @@ def fetch_funding_history(symbol: str, start_ms: int, end_ms: int) -> list:
         url = f"{BASE_URL}{ENDPOINT}?{query}"
         payload = request_json(url)
         if payload.get("retCode") != 0:
-            raise RuntimeError(f"接口返回错误: {payload.get('retMsg')}")
+            ret_msg = str(payload.get("retMsg") or "")
+            if "symbol invalid" in ret_msg.lower():
+                log(f"接口返回错误，交易对无效，跳过: {symbol} {ret_msg}")
+                return []
+            raise RuntimeError(f"接口返回错误: {ret_msg}")
         result = payload.get("result", {})
         items = result.get("list", [])
         if not items:
@@ -144,6 +163,8 @@ def run_symbol(symbol: str) -> None:
         log("没有新增数据")
         return
     records = fetch_funding_history(symbol, start_ms, end_ms)
+    if not records:
+        return
     count = write_records(file_path, symbol, records, existing_ts)
     log(f"已写入记录数: {count}")
 
@@ -152,13 +173,17 @@ def main() -> None:
     if not SYMBOLS:
         log("未配置交易对")
         return
-    threads = []
-    for symbol in SYMBOLS:
-        thread = threading.Thread(target=run_symbol, args=(symbol,))
-        thread.start()
-        threads.append(thread)
-    for thread in threads:
-        thread.join()
+    while True:
+        threads = []
+        for symbol in SYMBOLS:
+            thread = threading.Thread(target=run_symbol, args=(symbol,))
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
+        sleep_seconds = seconds_until_next_utc_midnight()
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
+        time.sleep(sleep_seconds)
 
 
 def run() -> None:

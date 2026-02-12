@@ -1,10 +1,16 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import importlib
 import threading
 import time
+import sys
 import websocket
-import app_config
+
+ROOT_DIR = Path(__file__).resolve().parents[1]  # 项目根目录，路径
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+app_config = importlib.import_module("app_config")  # 项目配置模块，模块
 
 WS_URL = "wss://stream.bybit.com/v5/public/spot"  # WebSocket地址，字符串
 SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数

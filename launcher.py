@@ -1,10 +1,14 @@
 from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import curses
+import math
+import os
 import runpy
 import sys
 import threading
 import time
+import unicodedata
 import app_config
 import D10001.d10001download as d10001download
 import D10005.d10005download as d10005download
@@ -41,6 +45,84 @@ TASK_DEFS = [
 ]  # 任务定义列表，个数
 
 
+TASK_LOCAL = threading.local()  # 任务线程上下文，线程
+
+SCHEDULE_REFRESH_SECONDS = 10  # 触发时间刷新间隔，秒
+MAX_LOG_LINE_CHARS = 2000  # 单行日志最大长度，字符
+TASK_FREQUENCY = {
+    "D10001": "每日",
+    "D10005": "每日",
+    "D10011": "每日",
+    "D10012": "每日",
+    "D10013": "每日",
+    "D10014": "每日",
+    "D10015": "每日",
+    "D10016": "每日",
+    "D10017": "每日",
+    "D10018": "每日",
+    "D10019": "每日",
+    "D10020": "每小时",
+    "D10021": "每小时",
+    "D10002-4": "实时",
+    "D10006-8": "实时",
+    "D10022-23": "实时",
+}  # 任务更新频率映射，映射
+
+
+def sanitize_log_text(text: str) -> str:
+    text = text.replace("\t", " ")
+    out = []
+    idx = 0
+    while idx < len(text):
+        ch = text[idx]
+        if ch == "\x1b" and idx + 1 < len(text) and text[idx + 1] == "[":
+            idx += 2
+            while idx < len(text):
+                tail = text[idx]
+                if "@" <= tail <= "~":
+                    idx += 1
+                    break
+                idx += 1
+            continue
+        code = ord(ch)
+        if code < 32 and ch != "\n":
+            idx += 1
+            continue
+        out.append(ch)
+        idx += 1
+    cleaned = "".join(out)
+    if len(cleaned) > MAX_LOG_LINE_CHARS:
+        cleaned = cleaned[:MAX_LOG_LINE_CHARS]
+    return cleaned
+
+
+def install_thread_task_inheritance(thread_task_map: dict) -> None:
+    original_init = threading.Thread.__init__
+    original_start = threading.Thread.start
+
+    def patched_init(self, *args, **kwargs):
+        target = kwargs.get("target")
+        task_id = getattr(TASK_LOCAL, "task_id", None)
+        if task_id and target:
+            if "daemon" not in kwargs:
+                kwargs["daemon"] = True
+            def wrapped_target(*a, **k):
+                TASK_LOCAL.task_id = task_id
+                thread_task_map[threading.get_ident()] = task_id
+                return target(*a, **k)
+            kwargs["target"] = wrapped_target
+        original_init(self, *args, **kwargs)
+
+    def patched_start(self, *args, **kwargs):
+        if getattr(TASK_LOCAL, "task_id", None):
+            self.daemon = True
+        return original_start(self, *args, **kwargs)
+
+    if getattr(threading.Thread.__init__, "__name__", "") != getattr(patched_init, "__name__", ""):
+        threading.Thread.__init__ = patched_init
+        threading.Thread.start = patched_start
+
+
 class Task:
     def __init__(self, task_id: str, name: str, module, script_path: Path | None):
         self.task_id = task_id
@@ -70,14 +152,76 @@ class Task:
                     init_globals={"QUIET": quiet, "STATUS_HOOK": status_hook, "LOG_HOOK": log_hook},
                 )
 
-        self.thread = threading.Thread(target=target)
+        def run_target():
+            TASK_LOCAL.task_id = self.task_id
+            thread_task_map[threading.get_ident()] = self.task_id
+            target()
+
+        self.thread = threading.Thread(target=run_target, name=self.task_id, daemon=True)
         self.thread.start()
-        while self.thread.ident is None:
-            time.sleep(0.01)
-        thread_task_map[self.thread.ident] = self.task_id
 
     def is_running(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
+
+
+def seconds_until_next_utc_midnight(now: datetime) -> int:
+    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    seconds = math.ceil((next_midnight - now).total_seconds())
+    return seconds if seconds > 0 else 1
+
+
+def seconds_until_next_utc_hour(now: datetime) -> int:
+    next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    seconds = math.ceil((next_hour - now).total_seconds())
+    return seconds if seconds > 0 else 1
+
+
+def format_countdown(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 24 * 3600)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days > 0:
+        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def compute_next_trigger(task_id: str) -> tuple[str, str]:
+    frequency = TASK_FREQUENCY.get(task_id, "")
+    now = datetime.now(tz=timezone.utc)
+    if frequency == "每日":
+        next_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        eta = seconds_until_next_utc_midnight(now)
+        return next_dt.strftime("%Y-%m-%d %H:%M:%S"), format_countdown(eta)
+    if frequency == "每小时":
+        next_dt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        eta = seconds_until_next_utc_hour(now)
+        return next_dt.strftime("%Y-%m-%d %H:%M:%S"), format_countdown(eta)
+    if frequency == "实时":
+        return "持续运行", "-"
+    return "-", "-"
+
+
+def cell_width(ch: str) -> int:
+    if not ch or ch == "\n":
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in {"F", "W"} else 1
+
+
+def truncate_by_cells(text: str, max_cells: int) -> str:
+    if max_cells <= 0 or not text:
+        return ""
+    used = 0
+    out = []
+    for ch in text:
+        w = cell_width(ch)
+        if used + w > max_cells:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out)
 
 
 def build_tasks():
@@ -106,8 +250,14 @@ class ThreadLogWriter:
     def write(self, text: str) -> None:
         if not text:
             return
-        task_id = self.thread_task_map.get(threading.get_ident())
+        task_id = self.thread_task_map.get(threading.get_ident()) or getattr(TASK_LOCAL, "task_id", None)
         if not task_id:
+            return
+        if "\r" in text:
+            self.pending[task_id] = ""
+            text = text.rsplit("\r", 1)[-1].lstrip()
+        text = sanitize_log_text(text)
+        if not text:
             return
         buffer = self.pending.get(task_id, "") + text
         parts = buffer.split("\n")
@@ -122,27 +272,37 @@ class ThreadLogWriter:
 
 
 class ErrorLogger:
-    def __init__(self, path: Path, keywords: list):
+    def __init__(self, path: Path, keywords: list, exclude_keywords: list):
         self.path = path
         self.keywords = [item.lower() for item in keywords]
+        self.exclude_keywords = [item.lower() for item in exclude_keywords]
+        self.trace_remaining = {}
         self.lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def should_log(self, line: str) -> bool:
         text = line.lower()
+        for keyword in self.exclude_keywords:
+            if keyword in text:
+                return False
         for keyword in self.keywords:
             if keyword.lower() in text:
                 return True
         return False
 
     def write(self, task_id: str, line: str) -> None:
-        if not self.should_log(line):
+        remaining = self.trace_remaining.get(task_id, 0)
+        if remaining > 0:
+            self.trace_remaining[task_id] = remaining - 1
+        elif not self.should_log(line):
             return
         ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         entry = f"{ts_text} [{task_id}] {line}\n"
         with self.lock:
             with self.path.open("a", encoding="utf-8") as f:
                 f.write(entry)
+        if "traceback (most recent call last):" in line.lower():
+            self.trace_remaining[task_id] = 200
 
 
 def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, dict]:
@@ -158,10 +318,13 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
     for task in tasks:
         logs[task.task_id] = deque(maxlen=app_config.LOG_LINES_PER_TASK)
         pending[task.task_id] = ""
-    error_logger = ErrorLogger(Path(app_config.ERROR_LOG_PATH), app_config.ERROR_LOG_KEYWORDS)
+    error_logger = ErrorLogger(
+        Path(app_config.ERROR_LOG_PATH), app_config.ERROR_LOG_KEYWORDS, app_config.ERROR_LOG_EXCLUDE_KEYWORDS
+    )
     writer = ThreadLogWriter(thread_task_map, logs, pending, error_logger)
     sys.stdout = writer
     sys.stderr = writer
+    install_thread_task_inheritance(thread_task_map)
 
     def make_hook(task_id: str):
         def hook(key: str, count: int) -> None:
@@ -182,15 +345,34 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
 
 def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
     stdscr.nodelay(True)
+    stdscr.keypad(True)
     selected = 0
+    schedule_cache = {}
+    last_schedule_ts = 0.0
     while True:
         stdscr.erase()
         max_rows, max_cols = stdscr.getmaxyx()
-        stdscr.addstr(0, 0, "统一启动管理（上下键切换，q退出）")
-        list_width = max_cols // 2
-        stdscr.addstr(1, 0, "任务 | 状态 | 计数 | 更新时间")
+        if max_rows <= 0 or max_cols <= 0:
+            time.sleep(app_config.TUI_REFRESH_SECONDS)
+            continue
+        list_width = max(30, max_cols // 3)
+        stdscr.addstr(0, 0, truncate_by_cells("启动管理（q退出）", max(0, list_width - 1)))
+        now_ts = time.time()
+        if now_ts - last_schedule_ts >= SCHEDULE_REFRESH_SECONDS:
+            last_schedule_ts = now_ts
+            schedule_cache.clear()
+            for task in tasks:
+                schedule_cache[task.task_id] = compute_next_trigger(task.task_id)
+        if max_rows > 1:
+            stdscr.addstr(
+                1,
+                0,
+                truncate_by_cells("任务 | 状态 | 计数 | 更新时间", max(0, list_width - 1)),
+            )
         row = 2
         for idx, task in enumerate(tasks):
+            if row >= max_rows:
+                break
             status = "运行中" if task.is_running() else "已退出"
             counts = status_counts.get(task.task_id, {})
             total_count = sum(counts.values()) if counts else 0
@@ -198,9 +380,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
             last_text = time.strftime("%H:%M:%S", time.localtime(last_ts)) if last_ts else "-"
             prefix = ">" if idx == selected else " "
             line = f"{prefix} {task.name} | {status} | {total_count} | {last_text}"
-            if len(line) >= list_width:
-                line = line[: list_width - 1]
-            stdscr.addstr(row, 0, line)
+            if list_width > 1:
+                stdscr.addstr(row, 0, truncate_by_cells(line, list_width - 1))
             row += 1
         if tasks:
             selected = max(0, min(selected, len(tasks) - 1))
@@ -211,14 +392,25 @@ def run_tui(stdscr, tasks, status_counts, status_times, logs, pending) -> None:
                 log_lines = log_lines + [pending_line]
             log_start = 2
             log_col = list_width + 1
-            stdscr.addstr(1, log_col, f"日志: {current.name}")
+            if max_rows > 1 and log_col < max_cols - 1:
+                if current.is_running():
+                    next_text, countdown_text = schedule_cache.get(current.task_id, ("-", "-"))
+                else:
+                    next_text, countdown_text = "-", "-"
+                schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text}"
+                stdscr.addstr(0, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
+                stdscr.addstr(1, log_col, truncate_by_cells(f"日志: {current.name}", max_cols - log_col - 1))
             visible_lines = max_rows - log_start - 1
             tail_lines = log_lines[-visible_lines:] if visible_lines > 0 else []
             for idx, line in enumerate(tail_lines):
                 text = line
-                if len(text) >= max_cols - log_col:
-                    text = text[: max_cols - log_col - 1]
-                stdscr.addstr(log_start + idx, log_col, text)
+                target_row = log_start + idx
+                if target_row >= max_rows:
+                    break
+                available = max_cols - log_col - 1
+                if available <= 0:
+                    break
+                stdscr.addstr(target_row, log_col, truncate_by_cells(text, available))
         stdscr.refresh()
         key = stdscr.getch()
         if key == ord("q"):
@@ -234,6 +426,7 @@ def main() -> None:
     tasks, status_counts, status_times, logs, pending = start_tasks()
     if tasks:
         curses.wrapper(run_tui, tasks, status_counts, status_times, logs, pending)
+        os._exit(0)
 
 
 if __name__ == "__main__":

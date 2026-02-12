@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import time
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -18,6 +19,13 @@ def log(message: str) -> None:
         print(message)
 
 
+def seconds_until_next_utc_hour() -> int:
+    now = datetime.now(tz=timezone.utc)
+    next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    seconds = int((next_hour - now).total_seconds())
+    return seconds if seconds > 0 else 1
+
+
 def iter_hours(start_hour: str, end_hour: str):
     start = datetime.strptime(start_hour, "%Y-%m-%d %H:%M")
     end = datetime.strptime(end_hour, "%Y-%m-%d %H:%M")
@@ -30,7 +38,6 @@ def iter_hours(start_hour: str, end_hour: str):
 def list_input_files(hour_str: str) -> list:
     hour_dir = INPUT_DIR / hour_str
     if not hour_dir.exists():
-        log(f"目录不存在: {hour_dir}")
         return []
     return sorted(hour_dir.glob(f"polymarket_orderbook_rt_ss-{hour_str}-batch_*.json"))
 
@@ -137,18 +144,55 @@ def process_hour(hour_str: str) -> None:
         output_records.append(normalize_record(record))
     output_records.sort(key=lambda r: (r["ts"], r["symbol"]))
     output_path = OUTPUT_DIR / hour_str / f"polymarket_orderbook_ss_1m_{hour_str}.parquet"
+    if output_path.exists():
+        return
+    tmp_output_path = output_path.with_name(output_path.name + ".part")
+    if tmp_output_path.exists():
+        tmp_output_path.unlink()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(output_records, schema=build_schema())
-    pq.write_table(table, output_path, compression="snappy")
+    pq.write_table(table, tmp_output_path, compression="snappy")
+    tmp_output_path.replace(output_path)
     log(f"已写入: {output_path}，记录数: {len(output_records)}")
 
 
+def parse_start_hour_tag() -> str:
+    return datetime.strptime(START_HOUR, "%Y-%m-%d %H:%M").strftime("%Y%m%d%H")
+
+
+def last_complete_hour_tag() -> str:
+    now_hour = datetime.now(tz=timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return (now_hour - timedelta(hours=1)).strftime("%Y%m%d%H")
+
+
+def list_available_hours() -> list:
+    if not INPUT_DIR.exists():
+        return []
+    hours = []
+    for path in INPUT_DIR.iterdir():
+        name = path.name
+        if not path.is_dir():
+            continue
+        if len(name) != 10 or not name.isdigit():
+            continue
+        hours.append(name)
+    hours.sort()
+    return hours
+
+
 def main() -> None:
-    end_hour = datetime.now(tz=timezone.utc).replace(minute=0, second=0, microsecond=0)
-    end_hour_str = end_hour.strftime("%Y-%m-%d %H:%M")
-    for hour_str in iter_hours(START_HOUR, end_hour_str):
-        log(f"开始处理: {hour_str}")
-        process_hour(hour_str)
+    start_tag = parse_start_hour_tag()
+    while True:
+        end_tag = last_complete_hour_tag()
+        for hour_str in list_available_hours():
+            if hour_str < start_tag:
+                continue
+            if hour_str > end_tag:
+                continue
+            process_hour(hour_str)
+        sleep_seconds = seconds_until_next_utc_hour()
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 整点）")
+        time.sleep(sleep_seconds)
 
 def run() -> None:
     main()

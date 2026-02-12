@@ -3,4 +3,7 @@ __pycache__/
 .DS_Store
 data/
 doc/
+logs/
+*.part
 **/download_failures.json
+**/download_failures.json.tmp

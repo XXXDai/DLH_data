@@ -1,14 +1,22 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import time
 import zipfile
+import importlib
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 from sortedcontainers import SortedDict
+import sys
+
+ROOT_DIR = Path(__file__).resolve().parents[1]  # 项目根目录，路径
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+app_config = importlib.import_module("app_config")  # 项目配置模块，模块
 
 INPUT_DIR = Path("data/src/bybit_future_orderbook_di")  # 输入目录，路径
 OUTPUT_DIR = Path("data/dwd/dwd_bybit_future_ob_ss_di")  # 输出目录，路径
-SYMBOL = "BTCUSDT"  # 交易对，字符串
+SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数
 DEPTH = 200  # 订单簿深度，档位
 START_DATE = "2026-02-11"  # 起始日期（含），日期
 BATCH_SIZE = 20000  # 批次大小，条
@@ -21,6 +29,13 @@ def log(message: str) -> None:
         LOG_HOOK(message)
     if not QUIET:
         print(message)
+
+
+def seconds_until_next_utc_midnight() -> int:
+    now = datetime.now(tz=timezone.utc)
+    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    seconds = int((next_midnight - now).total_seconds())
+    return seconds if seconds > 0 else 1
 
 
 def build_input_path(base_dir: Path, symbol: str, date_str: str) -> Path:
@@ -81,7 +96,7 @@ def build_snapshot(orderbook: dict, msg: dict, data: dict) -> dict:
     bid_list = [{"price": price, "qty": qty} for price, qty in reversed(bids.items())]
     ask_list = [{"price": price, "qty": qty} for price, qty in asks.items()]
     return {
-        "symbol": data.get("s", msg.get("symbol", SYMBOL)),
+        "symbol": data.get("s", msg.get("symbol")),
         "update_type": msg.get("type"),
         "ts": msg.get("ts"),
         "cts": msg.get("cts"),
@@ -120,16 +135,24 @@ def write_parquet(records: list, writer: pq.ParquetWriter, schema: pa.Schema) ->
     table = pa.Table.from_pylist(records, schema=schema)
     writer.write_table(table)
 
-
-def process_date(date_str: str) -> None:
-    input_path = build_input_path(INPUT_DIR, SYMBOL, date_str)
+def process_date(symbol: str, date_str: str) -> None:
+    input_path = build_input_path(INPUT_DIR, symbol, date_str)
     if not input_path.exists():
         log(f"文件不存在: {input_path}")
         return
-    output_path = build_output_path(OUTPUT_DIR, SYMBOL, date_str)
+    if not zipfile.is_zipfile(input_path):
+        log(f"文件不是有效zip: {input_path}")
+        input_path.unlink()
+        return
+    output_path = build_output_path(OUTPUT_DIR, symbol, date_str)
+    if output_path.exists():
+        return
+    tmp_output_path = output_path.with_name(output_path.name + ".part")
+    if tmp_output_path.exists():
+        tmp_output_path.unlink()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     schema = build_schema()
-    writer = pq.ParquetWriter(output_path, schema, compression="snappy")
+    writer = pq.ParquetWriter(tmp_output_path, schema, compression="snappy")
     orderbook = {"bids": SortedDict(), "asks": SortedDict()}
     has_snapshot = False
     batch = []
@@ -151,14 +174,46 @@ def process_date(date_str: str) -> None:
     if batch:
         write_parquet(batch, writer, schema)
     writer.close()
+    tmp_output_path.replace(output_path)
     log(f"已写入: {output_path}，记录数: {total}")
 
 
+def parse_date_from_name(name: str) -> str | None:
+    parts = name.split("_", 1)
+    if not parts:
+        return None
+    date_str = parts[0]
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return date_str
+
+
+def iter_available_dates(symbol: str) -> list:
+    symbol_dir = INPUT_DIR / symbol
+    if not symbol_dir.exists():
+        return []
+    dates = set()
+    for path in symbol_dir.glob(f"*_ob{DEPTH}.data.zip"):
+        date_str = parse_date_from_name(path.name)
+        if date_str:
+            dates.add(date_str)
+    dates_list = sorted(dates)
+    return [d for d in dates_list if d >= START_DATE]
+
+
 def main() -> None:
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    for date_str in iter_dates(START_DATE, end_date):
-        log(f"开始处理: {date_str}")
-        process_date(date_str)
+    if not SYMBOLS:
+        log("未配置交易对")
+        return
+    while True:
+        for symbol in SYMBOLS:
+            for date_str in iter_available_dates(symbol):
+                process_date(symbol, date_str)
+        sleep_seconds = seconds_until_next_utc_midnight()
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
+        time.sleep(sleep_seconds)
 
 def run() -> None:
     main()

@@ -3,11 +3,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+import importlib
 import json
+import sys
 import threading
 import time
 import websocket
-import app_config
+
+ROOT_DIR = Path(__file__).resolve().parents[1]  # 项目根目录，路径
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+app_config = importlib.import_module("app_config")  # 项目配置模块，模块
 
 EVENT_URL_TEMPLATES = app_config.POLYMARKET_EVENT_TEMPLATES  # 事件地址模板列表，个数
 ASSET_TAGS = app_config.POLYMARKET_ASSET_TAGS  # 资产映射列表，个数
@@ -297,19 +303,19 @@ def close_writer(writer) -> None:
         writer["file"].close()
 
 
-def load_asset_ids(event_url: str) -> list:
+def load_asset_ids(event_url: str, asset_tag: str, template: str) -> list:
     slug = extract_slug(event_url)
     try:
         event = fetch_event(slug)
     except HTTPError as exc:
-        log(f"事件请求失败，HTTP错误: {exc}")
+        log(f"事件请求失败，HTTP错误: {exc} {event_url}")
         return []
     except URLError as exc:
-        log(f"事件请求失败，网络错误: {exc}")
+        log(f"事件请求失败，网络错误: {exc} {event_url}")
         return []
     asset_ids = extract_asset_ids(event)
     if not asset_ids:
-        log("未获取到可订阅的资产ID")
+        log(f"未获取到可订阅的资产ID: {event_url}")
     return asset_ids
 
 
@@ -387,10 +393,10 @@ def run_once(asset_ids: list, event_key: str) -> None:
     close_writer(rt_ss_writer)
 
 
-def run_event_loop(template: str, name: str, symbol: str) -> None:
+def run_event_loop(asset_tag: str, template: str, name: str, symbol: str) -> None:
     while True:
         event_url = build_event_url(template, name, symbol)
-        asset_ids = load_asset_ids(event_url)
+        asset_ids = load_asset_ids(event_url, asset_tag, template)
         if asset_ids:
             run_once(asset_ids, event_url)
         time.sleep(RECONNECT_INTERVAL_SECONDS)
@@ -405,7 +411,7 @@ def main() -> None:
         for template in EVENT_URL_TEMPLATES:
             if "5m" in template and not include_5m:
                 continue
-            thread = threading.Thread(target=run_event_loop, args=(template, name, symbol))
+            thread = threading.Thread(target=run_event_loop, args=(asset_tag, template, name, symbol))
             thread.start()
             threads.append(thread)
     for thread in threads:
