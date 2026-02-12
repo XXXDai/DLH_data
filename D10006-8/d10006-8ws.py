@@ -200,7 +200,11 @@ def run_once(symbol: str) -> None:
                 print(f"\r已接收数量: {recv_count[0]}", end="", flush=True)
             last_status_ts[0] = now_ts
         collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-        msg = json.loads(raw)
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            log(f"解析失败，跳过: {exc} {symbol}")
+            continue
         if "topic" not in msg:
             continue
         msg = normalize_message(msg, collect_ts, symbol)

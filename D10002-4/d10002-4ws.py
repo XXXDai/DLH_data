@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import json
 import importlib
+import socket
 import threading
 import time
 import sys
@@ -279,7 +280,11 @@ def run_once(symbol: str, stop_event: threading.Event) -> None:
                 print(f"\r已接收数量: {recv_count[0]}", end="", flush=True)
             last_status_ts[0] = now_ts
         collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-        msg = json.loads(raw)
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            log(f"解析失败，跳过: {exc} {symbol}")
+            continue
         if "topic" not in msg:
             continue
         msg = normalize_message(msg, collect_ts, symbol)
@@ -342,6 +347,18 @@ def refresh_loop(thread_map: dict) -> None:
             log(f"交割合约获取失败，网络错误: {exc}")
             time.sleep(DELIVERY_REFRESH_SECONDS)
             continue
+        except TimeoutError as exc:
+            log(f"交割合约获取失败，超时: {exc}")
+            time.sleep(DELIVERY_REFRESH_SECONDS)
+            continue
+        except socket.timeout as exc:
+            log(f"交割合约获取失败，超时: {exc}")
+            time.sleep(DELIVERY_REFRESH_SECONDS)
+            continue
+        except json.JSONDecodeError as exc:
+            log(f"交割合约获取失败，返回格式错误: {exc}")
+            time.sleep(DELIVERY_REFRESH_SECONDS)
+            continue
         with THREAD_LOCK:
             current = set(thread_map.keys())
             to_stop = current - desired
@@ -363,6 +380,15 @@ def main() -> None:
         desired = set(SYMBOLS)
     except URLError as exc:
         log(f"交割合约获取失败，网络错误: {exc}")
+        desired = set(SYMBOLS)
+    except TimeoutError as exc:
+        log(f"交割合约获取失败，超时: {exc}")
+        desired = set(SYMBOLS)
+    except socket.timeout as exc:
+        log(f"交割合约获取失败，超时: {exc}")
+        desired = set(SYMBOLS)
+    except json.JSONDecodeError as exc:
+        log(f"交割合约获取失败，返回格式错误: {exc}")
         desired = set(SYMBOLS)
     if not desired:
         log("未配置交易对")

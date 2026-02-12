@@ -499,7 +499,11 @@ def run_stream(
                 raw = raw.decode("utf-8", errors="ignore")
             if isinstance(raw, str) and raw[:1] not in {"{", "["}:
                 continue
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                log(f"解析失败，跳过: {exc} {event_url}")
+                continue
             payloads = iter_payload(msg)
             if payloads and not ready_event.is_set():
                 ready_event.set()
