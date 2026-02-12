@@ -46,6 +46,15 @@ def seconds_until_next_utc_4h() -> int:
     return seconds if seconds > 0 else 1
 
 
+def align_to_utc_4h_boundary() -> None:
+    now = datetime.now(tz=timezone.utc)
+    if now.hour % 4 == 0 and now.minute == 0 and now.second == 0:
+        return
+    sleep_seconds = seconds_until_next_utc_4h()
+    log(f"启动对齐，等待 {sleep_seconds} 秒后执行（UTC 4小时倍数）")
+    time.sleep(sleep_seconds)
+
+
 def build_input_path(base_dir: Path, symbol: str, date_str: str) -> Path:
     file_name = f"{symbol}{date_str}.csv.gz"
     return base_dir / symbol / file_name
@@ -188,12 +197,13 @@ def main() -> None:
     if not SYMBOLS:
         log("未配置交易对")
         return
+    align_to_utc_4h_boundary()
     while True:
         for symbol in SYMBOLS:
             for date_str in iter_available_dates(symbol):
                 process_date(symbol, date_str)
         sleep_seconds = seconds_until_next_utc_4h()
-        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 每4小时）")
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
         time.sleep(sleep_seconds)
 
 def run() -> None:

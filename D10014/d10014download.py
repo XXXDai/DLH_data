@@ -62,6 +62,15 @@ def seconds_until_next_utc_4h() -> int:
     return seconds if seconds > 0 else 1
 
 
+def align_to_utc_4h_boundary() -> None:
+    now = datetime.now(tz=timezone.utc)
+    if now.hour % 4 == 0 and now.minute == 0 and now.second == 0:
+        return
+    sleep_seconds = seconds_until_next_utc_4h()
+    log(f"启动对齐，等待 {sleep_seconds} 秒后执行（UTC 4小时倍数）")
+    time.sleep(sleep_seconds)
+
+
 def build_fail_log_path() -> Path:
     return FAIL_LOG_DIR / "download_failures.json"
 
@@ -340,13 +349,14 @@ def run_symbol(symbol: str) -> None:
         start_date = max(START_DATE, backfill_start)
     done_count = 0
     skip_urls, done_count = run_initial_range(start_date, symbol, failures, fail_path, done_count)
+    align_to_utc_4h_boundary()
     while True:
         failures = load_failures(fail_path)
         done_count = retry_failures(failures, skip_urls, symbol, fail_path, done_count)
         done_count = download_today(failures, skip_urls, symbol, fail_path, done_count)
         skip_urls = set()
         sleep_seconds = seconds_until_next_utc_4h()
-        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 每4小时）")
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
         time.sleep(sleep_seconds)
 
 
