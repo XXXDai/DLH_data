@@ -204,7 +204,6 @@ def iter_available_dates(symbol: str) -> list:
 
 
 def main() -> None:
-    align_to_utc_4h_boundary()
     while True:
         symbols = resolve_symbols()
         if not symbols:

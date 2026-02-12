@@ -20,12 +20,11 @@ BASE_URL = "https://public.bybit.com/spot"  # 下载根地址，字符串
 SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数
 START_DATE = app_config.D10014_START_DATE  # 起始日期（含），日期
 DATA_DIR = Path("data/src/bybit_spot_trade_di")  # 保存目录，路径
-TIMEOUT_SECONDS = 30  # 请求超时，秒
-RETRY_TIMES = 5  # 最大重试次数，次
-RETRY_INTERVAL_SECONDS = 5  # 重试间隔，秒
-CHUNK_SIZE = 1024 * 1024  # 下载块大小，字节
-LOOP_INTERVAL_SECONDS = 4 * 60 * 60  # 循环间隔，秒
-INITIAL_BACKFILL_DAYS = 7  # 首次回填天数，天
+TIMEOUT_SECONDS = app_config.DOWNLOAD_TIMEOUT_SECONDS  # 请求超时，秒
+RETRY_TIMES = app_config.RETRY_TIMES  # 最大重试次数，次
+RETRY_INTERVAL_SECONDS = app_config.RETRY_INTERVAL_SECONDS  # 重试间隔，秒
+CHUNK_SIZE = app_config.CHUNK_SIZE  # 下载块大小，字节
+LOOP_INTERVAL_SECONDS = app_config.LOOP_INTERVAL_SECONDS  # 循环间隔，秒
 FAIL_LOG_DIR = Path("D10014")  # 失败记录目录，路径
 QUIET = False  # 静默模式开关，开关
 STATUS_HOOK = None  # 状态回调函数，函数
@@ -353,11 +352,8 @@ def run_symbol(symbol: str) -> None:
     if latest_local:
         start_date = next_date(latest_local)
     else:
-        backfill_days = max(1, INITIAL_BACKFILL_DAYS)
-        backfill_start = (datetime.now(tz=timezone.utc) - timedelta(days=backfill_days - 1)).strftime("%Y-%m-%d")
-        start_date = max(START_DATE, backfill_start)
+        start_date = START_DATE
     done_count = 0
-    align_to_utc_4h_boundary(symbol, done_count)
     skip_urls, done_count = run_initial_range(start_date, symbol, failures, fail_path, done_count)
     while True:
         failures = load_failures(fail_path)

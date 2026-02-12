@@ -475,7 +475,6 @@ def run_symbol(symbol: str) -> None:
     else:
         start_date = START_DATE
     done_count = 0
-    align_to_utc_4h_boundary(symbol, done_count)
     skip_urls, done_count = run_initial_range(
         start_date, symbol, failures, fail_path, done_count, delivery_end
     )
