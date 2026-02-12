@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 import json
 import importlib
 import shutil
@@ -24,6 +25,7 @@ INSTRUMENTS_LIMIT = 1000  # 交易对接口分页大小，条
 DELIVERY_CATEGORIES = app_config.BYBIT_FUTURE_DELIVERY_CATEGORIES  # 交割期货产品类型列表，个数
 DELIVERY_STATUSES = app_config.BYBIT_FUTURE_DELIVERY_STATUSES  # 交割期货状态列表，个数
 DELIVERY_EXCLUDE = app_config.BYBIT_FUTURE_DELIVERY_EXCLUDE  # 交割合约过滤列表，个数
+DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\\d{2}[A-Z]{3}\\d{2}$")  # 交割合约格式，正则
 SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数
 START_DATE = app_config.D10001_START_DATE  # 起始日期（不含），日期
 DATA_DIR = Path("data/src/bybit_future_orderbook_di")  # 保存目录，路径
@@ -182,6 +184,8 @@ def list_delivery_symbols(start_date: str) -> dict:
                     if delivery_time != 0 and delivery_time < start_ms:
                         continue
                     symbol = item.get("symbol")
+                    if symbol and not DELIVERY_SYMBOL_PATTERN.match(symbol):
+                        continue
                     if symbol and not symbol.endswith("USDT"):
                         continue
                     if symbol and symbol not in DELIVERY_EXCLUDE:
