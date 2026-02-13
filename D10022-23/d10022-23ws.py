@@ -40,6 +40,18 @@ QUIET = bool(globals().get("QUIET", False))  # 静默模式开关，开关
 STATUS_HOOK = globals().get("STATUS_HOOK")  # 状态回调函数，函数
 LOG_HOOK = globals().get("LOG_HOOK")  # 日志回调函数，函数
 
+EVENT_FETCH_CONCURRENCY = 2  # 事件接口并发数，个数
+EVENT_CACHE_SECONDS = 10 * 60  # 事件资产缓存有效期，秒
+EVENT_RETRY_MIN_SECONDS = 5  # 事件失败最小重试间隔，秒
+EVENT_RETRY_MAX_SECONDS = 10 * 60  # 事件失败最大重试间隔，秒
+WS_RECONNECT_MAX_SECONDS = 60  # WS最大重连间隔，秒
+POLY_EVENT_HTTP_TIMEOUT_SECONDS = 20  # Polymarket事件接口超时，秒
+POLY_WS_CONNECT_TIMEOUT_SECONDS = 20  # Polymarket连接握手超时，秒
+
+EVENT_FETCH_SEMAPHORE = threading.Semaphore(EVENT_FETCH_CONCURRENCY)  # 事件接口并发信号量，个数
+EVENT_CACHE_LOCK = threading.Lock()  # 事件缓存锁，锁
+EVENT_CACHE = {}  # 事件缓存字典，个数
+
 
 def extract_slug(event_url: str) -> str:
     parts = event_url.rstrip("/").split("/event/")
@@ -139,8 +151,8 @@ def parse_asset_tag(text: str) -> tuple[str, str, bool]:
 
 def fetch_event(slug: str) -> dict:
     url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
+    req = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    with urlopen(req, timeout=POLY_EVENT_HTTP_TIMEOUT_SECONDS) as response:
         payload = response.read()
     return json.loads(payload)
 
@@ -170,8 +182,8 @@ def extract_asset_ids(event: dict) -> list:
 
 
 def connect_ws() -> websocket.WebSocket:
-    ws = websocket.create_connection(WS_URL, timeout=WS_TIMEOUT_SECONDS, origin="https://polymarket.com")
-    ws.settimeout(RECV_TIMEOUT_SECONDS)
+    ws = websocket.create_connection(WS_URL, timeout=POLY_WS_CONNECT_TIMEOUT_SECONDS, origin="https://polymarket.com")
+    ws.settimeout(min(RECV_TIMEOUT_SECONDS, PING_INTERVAL_SECONDS))
     return ws
 
 
@@ -382,34 +394,95 @@ def close_writer(writer) -> None:
         writer["file"].close()
 
 
+def compute_backoff_seconds(fail_count: int) -> int:
+    if fail_count <= 0:
+        return max(1, int(RECONNECT_INTERVAL_SECONDS))
+    base = max(1, int(RECONNECT_INTERVAL_SECONDS))
+    backoff = base * (2 ** min(6, fail_count - 1))
+    return min(WS_RECONNECT_MAX_SECONDS, max(base, int(backoff)))
+
+
+def _record_event_fetch_failure(event_url: str) -> None:
+    now_ts = time.time()
+    with EVENT_CACHE_LOCK:
+        cached = EVENT_CACHE.get(event_url) or {}
+        fail_count = int(cached.get("fail_count") or 0) + 1
+        backoff = EVENT_RETRY_MIN_SECONDS * (2 ** min(10, fail_count - 1))
+        backoff = min(EVENT_RETRY_MAX_SECONDS, max(EVENT_RETRY_MIN_SECONDS, int(backoff)))
+        EVENT_CACHE[event_url] = {
+            "asset_ids": [],
+            "expires_at": 0.0,
+            "next_retry_at": now_ts + backoff,
+            "fail_count": fail_count,
+        }
+
+
 def load_asset_ids(event_url: str, asset_tag: str, template: str) -> list:
     slug = extract_slug(event_url)
+    now_ts = time.time()
+    with EVENT_CACHE_LOCK:
+        cached = EVENT_CACHE.get(event_url)
+        if cached:
+            asset_ids = cached.get("asset_ids") or []
+            expires_at = float(cached.get("expires_at") or 0)
+            next_retry_at = float(cached.get("next_retry_at") or 0)
+            if asset_ids and now_ts < expires_at:
+                return list(asset_ids)
+            if now_ts < next_retry_at:
+                return []
+    with EVENT_FETCH_SEMAPHORE:
+        with EVENT_CACHE_LOCK:
+            cached = EVENT_CACHE.get(event_url)
+            if cached:
+                asset_ids = cached.get("asset_ids") or []
+                expires_at = float(cached.get("expires_at") or 0)
+                next_retry_at = float(cached.get("next_retry_at") or 0)
+                if asset_ids and now_ts < expires_at:
+                    return list(asset_ids)
+                if now_ts < next_retry_at:
+                    return []
     try:
         event = fetch_event(slug)
     except HTTPError as exc:
-        log(f"事件请求失败，HTTP错误: {exc} {event_url}")
+        log(f"{asset_tag} {template_label(template)} 事件请求失败，HTTP错误: {exc} {event_url}")
+        _record_event_fetch_failure(event_url)
         return []
     except URLError as exc:
-        log(f"事件请求失败，网络错误: {exc} {event_url}")
+        log(f"{asset_tag} {template_label(template)} 事件请求失败，网络错误: {exc} {event_url}")
+        _record_event_fetch_failure(event_url)
         return []
     except RemoteDisconnected as exc:
-        log(f"事件请求失败，网络错误: {exc} {event_url}")
+        log(f"{asset_tag} {template_label(template)} 事件请求失败，网络错误: {exc} {event_url}")
+        _record_event_fetch_failure(event_url)
         return []
     except IncompleteRead as exc:
-        log(f"事件请求失败，网络错误: {exc} {event_url}")
+        log(f"{asset_tag} {template_label(template)} 事件请求失败，网络错误: {exc} {event_url}")
+        _record_event_fetch_failure(event_url)
         return []
     except TimeoutError as exc:
-        log(f"事件请求失败，超时: {exc} {event_url}")
+        log(f"{asset_tag} {template_label(template)} 事件请求失败，超时: {exc} {event_url}")
+        _record_event_fetch_failure(event_url)
         return []
     except socket.timeout as exc:
-        log(f"事件请求失败，超时: {exc} {event_url}")
+        log(f"{asset_tag} {template_label(template)} 事件请求失败，超时: {exc} {event_url}")
+        _record_event_fetch_failure(event_url)
         return []
     except json.JSONDecodeError as exc:
-        log(f"事件请求失败，返回格式错误: {exc} {event_url}")
+        log(f"{asset_tag} {template_label(template)} 事件请求失败，返回格式错误: {exc} {event_url}")
+        _record_event_fetch_failure(event_url)
         return []
     asset_ids = extract_asset_ids(event)
     if not asset_ids:
         log(f"未获取到可订阅的资产ID: {event_url}")
+        _record_event_fetch_failure(event_url)
+        return []
+    with EVENT_CACHE_LOCK:
+        EVENT_CACHE[event_url] = {
+            "asset_ids": list(asset_ids),
+            "expires_at": now_ts + EVENT_CACHE_SECONDS,
+            "next_retry_at": 0.0,
+            "fail_count": 0,
+        }
     return asset_ids
 
 
@@ -427,57 +500,87 @@ def run_stream(
     recv_count = [0]
     base_count = [None]
     last_status_ts = [time.monotonic()]
+    last_ping_ts = [time.monotonic()]
+    last_error_log_ts = [0.0]
+    connect_failures = 0
     orderbooks = {}
     while not stop_event.is_set():
         try:
             ws = connect_ws()
             send_subscribe(ws, asset_ids)
+            connect_failures = 0
         except websocket.WebSocketException as exc:
-            log(f"{status_key} 连接异常，准备重连: {exc} {event_url}")
-            time.sleep(RECONNECT_INTERVAL_SECONDS)
+            now = time.monotonic()
+            if now - last_error_log_ts[0] >= 5:
+                log(f"{status_key} 连接异常，准备重连: {exc} {event_url}")
+                last_error_log_ts[0] = now
+            connect_failures += 1
+            time.sleep(compute_backoff_seconds(connect_failures))
             continue
         except TimeoutError as exc:
-            log(f"{status_key} 连接超时，准备重连: {exc} {event_url}")
-            time.sleep(RECONNECT_INTERVAL_SECONDS)
+            now = time.monotonic()
+            if now - last_error_log_ts[0] >= 5:
+                log(f"{status_key} 连接超时，准备重连: {exc} {event_url}")
+                last_error_log_ts[0] = now
+            connect_failures += 1
+            time.sleep(compute_backoff_seconds(connect_failures))
             continue
         except OSError as exc:
-            log(f"{status_key} 网络错误，准备重连: {exc} {event_url}")
-            time.sleep(RECONNECT_INTERVAL_SECONDS)
+            now = time.monotonic()
+            if now - last_error_log_ts[0] >= 5:
+                log(f"{status_key} 网络错误，准备重连: {exc} {event_url}")
+                last_error_log_ts[0] = now
+            connect_failures += 1
+            time.sleep(compute_backoff_seconds(connect_failures))
             continue
 
-        def keepalive():
-            while not stop_event.is_set():
-                time.sleep(PING_INTERVAL_SECONDS)
-                try:
-                    ws.send("PING")
-                except websocket.WebSocketException:
-                    break
-                except TimeoutError:
-                    break
-                except OSError:
-                    break
-                if active_event.is_set():
-                    now_ts = time.monotonic()
-                    if now_ts - last_status_ts[0] >= STATUS_INTERVAL_SECONDS:
+        while not stop_event.is_set():
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                now_ts = time.monotonic()
+                if now_ts - last_ping_ts[0] >= PING_INTERVAL_SECONDS:
+                    try:
+                        ws.ping()
+                    except websocket.WebSocketException as exc:
+                        log(f"{status_key} 心跳失败，准备重连: {exc} {event_url}")
+                        connect_failures += 1
+                        break
+                    except TimeoutError as exc:
+                        log(f"{status_key} 心跳超时，准备重连: {exc} {event_url}")
+                        connect_failures += 1
+                        break
+                    except OSError as exc:
+                        log(f"{status_key} 心跳网络错误，准备重连: {exc} {event_url}")
+                        connect_failures += 1
+                        break
+                    last_ping_ts[0] = now_ts
+                    if active_event.is_set():
                         if base_count[0] is None:
                             base_count[0] = recv_count[0]
                         if STATUS_HOOK:
                             STATUS_HOOK(status_key, (recv_count[0] - base_count[0], slug))
-                        last_status_ts[0] = now_ts
-
-        keepalive_thread = threading.Thread(target=keepalive, daemon=True)
-        keepalive_thread.start()
-        while not stop_event.is_set():
-            try:
-                raw = ws.recv()
+                continue
             except websocket.WebSocketException as exc:
-                log(f"{status_key} 连接异常，准备重连: {exc} {event_url}")
+                now = time.monotonic()
+                if now - last_error_log_ts[0] >= 5:
+                    log(f"{status_key} 连接异常，准备重连: {exc} {event_url}")
+                    last_error_log_ts[0] = now
+                connect_failures += 1
                 break
             except TimeoutError as exc:
-                log(f"{status_key} 连接超时，准备重连: {exc} {event_url}")
+                now = time.monotonic()
+                if now - last_error_log_ts[0] >= 5:
+                    log(f"{status_key} 连接超时，准备重连: {exc} {event_url}")
+                    last_error_log_ts[0] = now
+                connect_failures += 1
                 break
             except OSError as exc:
-                log(f"{status_key} 网络错误，准备重连: {exc} {event_url}")
+                now = time.monotonic()
+                if now - last_error_log_ts[0] >= 5:
+                    log(f"{status_key} 网络错误，准备重连: {exc} {event_url}")
+                    last_error_log_ts[0] = now
+                connect_failures += 1
                 break
 
             recv_count[0] += 1
@@ -544,7 +647,7 @@ def run_stream(
             pass
         except OSError:
             pass
-        time.sleep(RECONNECT_INTERVAL_SECONDS)
+        time.sleep(compute_backoff_seconds(connect_failures))
     close_writer(rt_writer)
     close_writer(rt_ss_writer)
 
