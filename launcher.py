@@ -433,6 +433,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if list_width > 1:
                 stdscr.addstr(row, 0, truncate_by_cells(line, list_width - 1))
             row += 1
+        list_height = max(0, row - 2)
         if tasks:
             selected = max(0, min(selected, len(tasks) - 1))
             current = tasks[selected]
@@ -488,14 +489,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if status_items:
                 available = max_cols - log_col - 1
                 total = len(status_items)
-                status_height_max = max_rows - log_start - 1
-                min_log_lines = 4
-                if status_height_max > min_log_lines:
-                    status_height = min(total, status_height_max - min_log_lines)
-                else:
-                    status_height = min(total, status_height_max)
-                if status_height < 1:
-                    status_height = min(total, max(0, status_height_max))
+                status_height = min(total, list_height)
                 status_height_cached = status_height
                 status_selected_index = max(0, min(status_selected_index, total - 1))
                 if status_selected_index < status_scroll:
@@ -540,7 +534,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                             stdscr.addstr(target_row, text_col, truncate_by_cells(line_text, text_available))
                     else:
                         stdscr.addstr(target_row, log_col, truncate_by_cells(line_text, available))
-                log_start = log_start + status_height + 2
+                log_start = log_start + status_height + 1
                 if focus == "status":
                     selected_key = status_items[status_selected_index][0]
                     log_lines = [line for line in log_lines if selected_key in line]
