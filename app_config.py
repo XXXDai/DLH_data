@@ -39,6 +39,7 @@ DOWNLOAD_TIMEOUT_SECONDS = 30  # 下载超时，秒
 RETRY_TIMES = 5  # 最大重试次数，次
 RETRY_INTERVAL_SECONDS = 5  # 重试间隔，秒
 CHUNK_SIZE = 1024 * 1024  # 下载块大小，字节
+DOWNLOAD_CONCURRENCY = 8  # 下载并发数，个数
 LOOP_INTERVAL_SECONDS = 4 * 60 * 60  # 循环间隔，秒
 DELIVERY_REFRESH_SECONDS = 15 * 60  # 交割合约刷新间隔，秒
 

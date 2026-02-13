@@ -243,6 +243,32 @@ def truncate_by_cells(text: str, max_cells: int) -> str:
     return "".join(out)
 
 
+def pad_to_cells(text: str, target_cells: int) -> str:
+    text = text or ""
+    used = 0
+    for ch in text:
+        used += cell_width(ch)
+    if used >= target_cells:
+        return truncate_by_cells(text, target_cells)
+    return text + (" " * (target_cells - used))
+
+
+def parse_download_status(text: str) -> tuple[str, str, str]:
+    text = (text or "").strip()
+    if not text:
+        return "-", "-", "-"
+    parts = text.split()
+    if len(parts) >= 3 and "/" in parts[0] and len(parts[1]) == 10:
+        return parts[0], parts[1], parts[2]
+    if len(parts) >= 3 and parts[0] in {"重试", "今日"}:
+        return parts[0], parts[1], parts[2]
+    if len(parts) >= 2 and parts[0] == "对齐等待":
+        return "对齐", "-", parts[1]
+    if text == "已对齐":
+        return "对齐", "-", "-"
+    return "-", "-", truncate_by_cells(text, 60)
+
+
 def build_tasks():
     tasks = []
     root = Path(__file__).resolve().parent
@@ -476,6 +502,15 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     title = "下载状态"
                 for key in sorted(counts):
                     value = counts[key]
+                    if (
+                        current.task_id in {"D10001", "D10005", "D10013", "D10014"}
+                        and isinstance(value, tuple)
+                        and len(value) >= 2
+                        and isinstance(value[0], (int, float))
+                    ):
+                        progress, date_text, file_name = parse_download_status(str(value[1]))
+                        status_items.append((key, (int(value[0]), progress, date_text, file_name), None))
+                        continue
                     if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
                         line_text = f"{key}: {value[0]} {value[1]}"
                     else:
@@ -489,7 +524,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if status_items:
                 available = max_cols - log_col - 1
                 total = len(status_items)
-                status_height = min(total, list_height)
+                status_header = None
+                if current.task_id in {"D10001", "D10005", "D10013", "D10014"}:
+                    status_header = ("交易对", "完成", "进度", "日期", "文件名")
+                header_rows = 1 if status_header else 0
+                status_height = min(total, max(0, list_height - header_rows))
                 status_height_cached = status_height
                 status_selected_index = max(0, min(status_selected_index, total - 1))
                 if status_selected_index < status_scroll:
@@ -504,16 +543,64 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 else:
                     title_line = title
                 stdscr.addstr(log_start, log_col, truncate_by_cells(title_line, available))
+                if status_header:
+                    max_symbol_cells = 0
+                    max_done_cells = 0
+                    max_progress_cells = 0
+                    items_for_width = [item for item in status_items if isinstance(item[1], tuple)]
+                    for _key, record, _alive in items_for_width:
+                        if not isinstance(record, tuple) or len(record) != 4:
+                            continue
+                        done_count, progress, _date_text, _file_name = record
+                        max_symbol_cells = max(max_symbol_cells, sum(cell_width(ch) for ch in str(_key)))
+                        max_done_cells = max(max_done_cells, sum(cell_width(ch) for ch in str(done_count)))
+                        max_progress_cells = max(max_progress_cells, sum(cell_width(ch) for ch in str(progress)))
+                    symbol_cells = min(max(6, max_symbol_cells), 20)
+                    done_cells = max(2, max_done_cells)
+                    progress_cells = min(max(2, max_progress_cells), 8)
+                    date_cells = 10
+                    reserved_cells = symbol_cells + 1 + done_cells + 1 + progress_cells + 1 + date_cells + 1
+                    file_cells = max(0, available - 2 - reserved_cells)
+                    header_text = (
+                        "  "
+                        + pad_to_cells(status_header[0], symbol_cells)
+                        + " "
+                        + pad_to_cells(status_header[1], done_cells)
+                        + " "
+                        + pad_to_cells(status_header[2], progress_cells)
+                        + " "
+                        + pad_to_cells(status_header[3], date_cells)
+                        + " "
+                        + pad_to_cells(status_header[4], file_cells)
+                    )
+                    stdscr.addstr(log_start + 1, log_col, truncate_by_cells(header_text, available))
                 for idx in range(status_height):
                     item_index = status_scroll + idx
                     if item_index >= total:
                         break
-                    target_row = log_start + 1 + idx
+                    target_row = log_start + 1 + header_rows + idx
                     if target_row >= max_rows:
                         break
                     if available <= 0:
                         break
                     key, line_text, alive = status_items[item_index]
+                    if isinstance(line_text, tuple) and len(line_text) == 4:
+                        done_count, progress, date_text, file_name = line_text
+                        prefix = "> " if item_index == status_selected_index else "  "
+                        row_text = (
+                            prefix
+                            + pad_to_cells(key, symbol_cells)
+                            + " "
+                            + pad_to_cells(str(done_count), done_cells)
+                            + " "
+                            + pad_to_cells(str(progress), progress_cells)
+                            + " "
+                            + pad_to_cells(str(date_text), date_cells)
+                            + " "
+                            + truncate_by_cells(str(file_name), file_cells)
+                        )
+                        stdscr.addstr(target_row, log_col, truncate_by_cells(row_text, available))
+                        continue
                     prefix = "> " if item_index == status_selected_index else "  "
                     line_text = prefix + line_text
                     if alive is not None:
@@ -534,7 +621,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                             stdscr.addstr(target_row, text_col, truncate_by_cells(line_text, text_available))
                     else:
                         stdscr.addstr(target_row, log_col, truncate_by_cells(line_text, available))
-                log_start = log_start + status_height + 1
+                log_start = log_start + status_height + 1 + header_rows
                 if focus == "status":
                     selected_key = status_items[status_selected_index][0]
                     log_lines = [line for line in log_lines if selected_key in line]

@@ -35,6 +35,8 @@ TIMEOUT_SECONDS = app_config.DOWNLOAD_TIMEOUT_SECONDS  # 请求超时，秒
 RETRY_TIMES = app_config.RETRY_TIMES  # 最大重试次数，次
 RETRY_INTERVAL_SECONDS = app_config.RETRY_INTERVAL_SECONDS  # 重试间隔，秒
 CHUNK_SIZE = app_config.CHUNK_SIZE  # 下载块大小，字节
+DOWNLOAD_CONCURRENCY = app_config.DOWNLOAD_CONCURRENCY  # 下载并发数，个数
+DOWNLOAD_SEMAPHORE = threading.Semaphore(DOWNLOAD_CONCURRENCY)  # 下载并发信号量，个数
 LOOP_INTERVAL_SECONDS = app_config.LOOP_INTERVAL_SECONDS  # 循环间隔，秒
 DELIVERY_REFRESH_SECONDS = app_config.DELIVERY_REFRESH_SECONDS  # 交割合约刷新间隔，秒
 FAIL_LOG_DIR = Path("D10001")  # 失败记录目录，路径
@@ -248,26 +250,27 @@ def download_file(url: str, dest_path: Path) -> tuple[int | None, str | None]:
     last_error = None
     for attempt in range(1, RETRY_TIMES + 1):
         try:
-            with urlopen(url, timeout=TIMEOUT_SECONDS) as response:
-                length = response.getheader("Content-Length")
-                total_size = int(length) if length and length.isdigit() else None
-                if tmp_path.exists():
-                    tmp_path.unlink()
-                with tmp_path.open("wb") as f:
-                    with tqdm(
-                        total=total_size,
-                        unit="B",
-                        unit_scale=True,
-                        unit_divisor=1024,
-                        desc="下载",
-                        disable=QUIET,
-                    ) as pbar:
-                        while True:
-                            chunk = response.read(CHUNK_SIZE)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            pbar.update(len(chunk))
+            with DOWNLOAD_SEMAPHORE:
+                with urlopen(url, timeout=TIMEOUT_SECONDS) as response:
+                    length = response.getheader("Content-Length")
+                    total_size = int(length) if length and length.isdigit() else None
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                    with tmp_path.open("wb") as f:
+                        with tqdm(
+                            total=total_size,
+                            unit="B",
+                            unit_scale=True,
+                            unit_divisor=1024,
+                            desc="下载",
+                            disable=QUIET,
+                        ) as pbar:
+                            while True:
+                                chunk = response.read(CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                pbar.update(len(chunk))
             downloaded_size = tmp_path.stat().st_size
             if downloaded_size == 0:
                 last_error = "下载为空: 0字节"
@@ -302,7 +305,9 @@ def download_file(url: str, dest_path: Path) -> tuple[int | None, str | None]:
             if tmp_path.exists():
                 tmp_path.unlink()
         if attempt < RETRY_TIMES:
-            time.sleep(RETRY_INTERVAL_SECONDS)
+            backoff = RETRY_INTERVAL_SECONDS * (2 ** (attempt - 1))
+            jitter = time.time() % 1
+            time.sleep(min(60, backoff) + jitter)
     return None, last_error
 
 
