@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import importlib
 import shutil
+import socket
 import threading
 import time
 import sys
@@ -175,6 +176,11 @@ def download_file(url: str, dest_path: Path) -> tuple[int | None, str | None]:
                 continue
             tmp_path.replace(dest_path)
             return downloaded_size, None
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = f"超时错误: {exc}"
+            log(f"下载失败，超时错误，重试{attempt}/{RETRY_TIMES}: {exc}")
+            if tmp_path.exists():
+                tmp_path.unlink()
         except HTTPError as exc:
             last_error = f"HTTP错误: {exc}"
             if exc.code == 404:
@@ -259,7 +265,7 @@ def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failu
     if dest_path.exists() and dest_path.stat().st_size > 0:
         failures[:] = update_failures_file(fail_path, None, url)
         log(f"已存在，跳过下载: {dest_path}")
-        return False
+        return True
     size, error_message = download_file(url, dest_path)
     if size is None:
         record = {
@@ -282,12 +288,12 @@ def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: P
     end_date = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     dates = list(iter_dates(start_date, end_date))
     total_days = len(dates)
-    log(f"总天数: {total_days}")
+    log(f"{symbol} 总天数: {total_days}")
     attempted = set()
     for idx, date_str in enumerate(dates, 1):
         url = build_url(BASE_URL, symbol, date_str)
         file_name = Path(urlparse(url).path).name
-        log(f"日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
+        log(f"{symbol} 日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
         status_update(symbol, done_count, f"{idx}/{total_days} {date_str} {file_name}")
         attempted.add(url)
         if download_by_url(url, date_str, symbol, fail_path, failures):
@@ -299,7 +305,7 @@ def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: P
 def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
     if not failures:
         return done_count
-    log(f"失败重试数: {len(failures)}")
+    log(f"{symbol} 失败重试数: {len(failures)}")
     for item in list(failures):
         url = item.get("url")
         if not url:
@@ -320,15 +326,15 @@ def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path,
 
 def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
     date_str = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    log(f"当前日期下载: {date_str}（UTC）")
+    log(f"{symbol} 当前日期下载: {date_str}（UTC）")
     url = build_url(BASE_URL, symbol, date_str)
     file_name = Path(urlparse(url).path).name
     status_update(symbol, done_count, f"今日 {date_str} {file_name}")
     if url in skip_urls:
-        log("今日数据已在本轮尝试中，跳过重复请求")
+        log(f"{symbol} 今日数据已在本轮尝试中，跳过重复请求")
         return done_count
     if has_failure(failures, url):
-        log("今日数据已在失败列表中，本轮跳过重复请求")
+        log(f"{symbol} 今日数据已在失败列表中，本轮跳过重复请求")
         return done_count
     dest_path = build_output_path(DATA_DIR, symbol, date_str)
     if dest_path.exists():
@@ -336,7 +342,7 @@ def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path,
             log(f"文件为空，将重新下载: {dest_path}")
             dest_path.unlink()
         else:
-            log(f"已存在，跳过今日下载: {dest_path}")
+            log(f"{symbol} 已存在，跳过今日下载: {dest_path}")
             failures[:] = update_failures_file(fail_path, None, url)
             return done_count
     if download_by_url(url, date_str, symbol, fail_path, failures):
@@ -361,7 +367,7 @@ def run_symbol(symbol: str) -> None:
         done_count = download_today(failures, skip_urls, symbol, fail_path, done_count)
         skip_urls = set()
         sleep_seconds = seconds_until_next_utc_4h()
-        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
+        log(f"{symbol} 等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
         time.sleep(sleep_seconds)
 
 

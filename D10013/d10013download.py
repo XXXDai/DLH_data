@@ -4,9 +4,11 @@ import re
 import json
 import importlib
 import shutil
+import socket
 import threading
 import time
 import sys
+import traceback
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import urlopen
@@ -114,9 +116,18 @@ def iter_dates(start_date: str, end_date: str):
         current += timedelta(days=1)
 
 
-def request_json(url: str) -> dict:
-    with urlopen(url, timeout=INSTRUMENTS_TIMEOUT_SECONDS) as response:
-        return json.loads(response.read().decode("utf-8"))
+def request_json(url: str) -> dict | None:
+    for attempt in range(1, RETRY_TIMES + 1):
+        try:
+            with urlopen(url, timeout=INSTRUMENTS_TIMEOUT_SECONDS) as response:
+                payload = response.read().decode("utf-8")
+            return json.loads(payload)
+        except (TimeoutError, socket.timeout, HTTPError, URLError, json.JSONDecodeError) as exc:
+            log(f"接口请求失败，重试 {attempt}/{RETRY_TIMES}: {url} {exc}")
+            log(traceback.format_exc().strip())
+            time.sleep(RETRY_INTERVAL_SECONDS)
+    log(f"接口请求失败，放弃本轮: {url}")
+    return None
 
 
 def build_instruments_url(category: str, status: str, cursor: str | None) -> str:
@@ -140,6 +151,8 @@ def list_delivery_symbols(start_date: str) -> dict:
             while True:
                 url = build_instruments_url(category, status, cursor)
                 payload = request_json(url)
+                if not payload:
+                    break
                 if payload.get("retCode") != 0:
                     log(f"接口返回错误: {payload.get('retMsg')}")
                     break
@@ -240,6 +253,11 @@ def download_file(url: str, dest_path: Path) -> tuple[int | None, str | None]:
                 continue
             tmp_path.replace(dest_path)
             return downloaded_size, None
+        except (TimeoutError, socket.timeout) as exc:
+            last_error = f"超时错误: {exc}"
+            log(f"下载失败，超时错误，重试{attempt}/{RETRY_TIMES}: {exc}")
+            if tmp_path.exists():
+                tmp_path.unlink()
         except HTTPError as exc:
             last_error = f"HTTP错误: {exc}"
             if exc.code == 404:
@@ -324,7 +342,7 @@ def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failu
     if dest_path.exists() and dest_path.stat().st_size > 0:
         failures[:] = update_failures_file(fail_path, None, url)
         log(f"已存在，跳过下载: {dest_path}")
-        return False
+        return True
     size, error_message = download_file(url, dest_path)
     if size is None:
         record = {
@@ -356,12 +374,12 @@ def run_initial_range(
         end_date = delivery_end
     dates = list(iter_dates(start_date, end_date))
     total_days = len(dates)
-    log(f"总天数: {total_days}")
+    log(f"{symbol} 总天数: {total_days}")
     attempted = set()
     for idx, date_str in enumerate(dates, 1):
         url = build_url(BASE_URL, symbol, date_str)
         file_name = Path(urlparse(url).path).name
-        log(f"日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
+        log(f"{symbol} 日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
         status_update(symbol, done_count, f"{idx}/{total_days} {date_str} {file_name}")
         attempted.add(url)
         if download_by_url(url, date_str, symbol, fail_path, failures):
@@ -380,7 +398,7 @@ def retry_failures(
 ) -> int:
     if not failures:
         return done_count
-    log(f"失败重试数: {len(failures)}")
+    log(f"{symbol} 失败重试数: {len(failures)}")
     for item in list(failures):
         url = item.get("url")
         if not url:
@@ -413,15 +431,15 @@ def download_today(
     if delivery_end and date_str > delivery_end:
         log(f"交割合约已到期，停止今日下载: {symbol} {delivery_end}")
         return done_count
-    log(f"当前日期下载: {date_str}（UTC）")
+    log(f"{symbol} 当前日期下载: {date_str}（UTC）")
     url = build_url(BASE_URL, symbol, date_str)
     file_name = Path(urlparse(url).path).name
     status_update(symbol, done_count, f"今日 {date_str} {file_name}")
     if url in skip_urls:
-        log("今日数据已在本轮尝试中，跳过重复请求")
+        log(f"{symbol} 今日数据已在本轮尝试中，跳过重复请求")
         return done_count
     if has_failure(failures, url):
-        log("今日数据已在失败列表中，本轮跳过重复请求")
+        log(f"{symbol} 今日数据已在失败列表中，本轮跳过重复请求")
         return done_count
     dest_path = build_output_path(DATA_DIR, symbol, date_str)
     if dest_path.exists():
@@ -429,7 +447,7 @@ def download_today(
             log(f"文件为空，将重新下载: {dest_path}")
             dest_path.unlink()
         else:
-            log(f"已存在，跳过今日下载: {dest_path}")
+            log(f"{symbol} 已存在，跳过今日下载: {dest_path}")
             failures[:] = update_failures_file(fail_path, None, url)
             return done_count
     if download_by_url(url, date_str, symbol, fail_path, failures):
@@ -468,7 +486,7 @@ def run_symbol(symbol: str) -> None:
             return
         skip_urls = set()
         sleep_seconds = seconds_until_next_utc_midnight()
-        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
+        log(f"{symbol} 等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
         time.sleep(sleep_seconds)
 
 
