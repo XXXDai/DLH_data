@@ -159,7 +159,8 @@ def list_delivery_symbols(start_date: str) -> dict:
                         continue
                     if symbol and not symbol.split("-")[0].endswith("USDT"):
                         continue
-                    if symbol and symbol not in DELIVERY_EXCLUDE:
+                    base_symbol = symbol.split("-")[0] if symbol else ""
+                    if symbol and base_symbol not in DELIVERY_EXCLUDE:
                         symbols[symbol] = delivery_time
                 cursor = result.get("nextPageCursor")
                 if not cursor:

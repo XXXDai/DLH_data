@@ -386,6 +386,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         curses.init_pair(1, curses.COLOR_GREEN, -1)
         curses.init_pair(2, curses.COLOR_RED, -1)
     selected = 0
+    focus = "tasks"
+    status_selected_index = 0
+    status_scroll = 0
+    prev_task_id = None
+    status_height_cached = 0
     schedule_cache = {}
     last_schedule_ts = 0.0
     while True:
@@ -431,6 +436,10 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         if tasks:
             selected = max(0, min(selected, len(tasks) - 1))
             current = tasks[selected]
+            if current.task_id != prev_task_id:
+                status_selected_index = 0
+                status_scroll = 0
+                prev_task_id = current.task_id
             log_lines = list(logs.get(current.task_id, []))
             pending_line = pending.get(current.task_id, "")
             if pending_line:
@@ -445,7 +454,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text}"
                 stdscr.addstr(0, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
                 stdscr.addstr(1, log_col, truncate_by_cells(f"日志: {current.name}", max_cols - log_col - 1))
-            status_lines = []
+            status_items = []
             ws_tasks = {"D10002-4", "D10006-8", "D10022-23"}
             if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10020", "D10021", "D10002-4", "D10006-8", "D10022-23"}:
                 counts = status_counts.get(current.task_id, {})
@@ -464,7 +473,6 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     title = "聚合状态"
                 else:
                     title = "下载状态"
-                status_lines.append(title)
                 for key in sorted(counts):
                     value = counts[key]
                     if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
@@ -474,19 +482,47 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     if current.task_id in ws_tasks:
                         last_ts = status_meta.get(current.task_id, {}).get(key)
                         alive = bool(last_ts and (time.time() - last_ts) <= WS_STATUS_STALE_SECONDS)
-                        status_lines.append((line_text, alive))
+                        status_items.append((key, line_text, alive))
                     else:
-                        status_lines.append(line_text)
-            if status_lines:
+                        status_items.append((key, line_text, None))
+            if status_items:
                 available = max_cols - log_col - 1
-                for idx, line in enumerate(status_lines):
-                    target_row = log_start + idx
+                total = len(status_items)
+                status_height_max = max_rows - log_start - 1
+                min_log_lines = 4
+                if status_height_max > min_log_lines:
+                    status_height = min(total, status_height_max - min_log_lines)
+                else:
+                    status_height = min(total, status_height_max)
+                if status_height < 1:
+                    status_height = min(total, max(0, status_height_max))
+                status_height_cached = status_height
+                status_selected_index = max(0, min(status_selected_index, total - 1))
+                if status_selected_index < status_scroll:
+                    status_scroll = status_selected_index
+                if status_selected_index >= status_scroll + status_height:
+                    status_scroll = status_selected_index - status_height + 1
+                max_scroll = max(0, total - status_height)
+                status_scroll = max(0, min(status_scroll, max_scroll))
+                if status_height > 0:
+                    end_idx = min(status_scroll + status_height, total)
+                    title_line = f"{title} {status_scroll + 1}-{end_idx}/{total}"
+                else:
+                    title_line = title
+                stdscr.addstr(log_start, log_col, truncate_by_cells(title_line, available))
+                for idx in range(status_height):
+                    item_index = status_scroll + idx
+                    if item_index >= total:
+                        break
+                    target_row = log_start + 1 + idx
                     if target_row >= max_rows:
                         break
                     if available <= 0:
                         break
-                    if isinstance(line, tuple):
-                        line_text, alive = line
+                    key, line_text, alive = status_items[item_index]
+                    prefix = "> " if item_index == status_selected_index else "  "
+                    line_text = prefix + line_text
+                    if alive is not None:
                         dot = "●"
                         dot_width = cell_width(dot)
                         text_col = log_col
@@ -503,8 +539,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                         if text_available > 0:
                             stdscr.addstr(target_row, text_col, truncate_by_cells(line_text, text_available))
                     else:
-                        stdscr.addstr(target_row, log_col, truncate_by_cells(line, available))
-                log_start = log_start + len(status_lines) + 1
+                        stdscr.addstr(target_row, log_col, truncate_by_cells(line_text, available))
+                log_start = log_start + status_height + 2
+                if focus == "status":
+                    selected_key = status_items[status_selected_index][0]
+                    log_lines = [line for line in log_lines if selected_key in line]
             visible_lines = max_rows - log_start - 1
             tail_lines = log_lines[-visible_lines:] if visible_lines > 0 else []
             for idx, line in enumerate(tail_lines):
@@ -520,10 +559,26 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         key = stdscr.getch()
         if key == ord("q"):
             break
-        if key == curses.KEY_UP:
-            selected -= 1
-        if key == curses.KEY_DOWN:
-            selected += 1
+        if key == curses.KEY_LEFT:
+            focus = "tasks"
+        if key == curses.KEY_RIGHT:
+            focus = "status"
+        if key == ord("\t"):
+            focus = "status" if focus == "tasks" else "tasks"
+        if focus == "tasks":
+            if key == curses.KEY_UP:
+                selected -= 1
+            if key == curses.KEY_DOWN:
+                selected += 1
+        else:
+            if key == curses.KEY_UP:
+                status_selected_index -= 1
+            if key == curses.KEY_DOWN:
+                status_selected_index += 1
+            if key == curses.KEY_NPAGE:
+                status_selected_index += max(1, status_height_cached)
+            if key == curses.KEY_PPAGE:
+                status_selected_index -= max(1, status_height_cached)
         time.sleep(app_config.TUI_REFRESH_SECONDS)
 
 
