@@ -24,7 +24,7 @@ INSTRUMENTS_LIMIT = app_config.INSTRUMENTS_LIMIT  # 交易对接口分页大小�
 DELIVERY_CATEGORIES = app_config.BYBIT_FUTURE_DELIVERY_CATEGORIES  # 交割合约产品类型列表，个数
 DELIVERY_STATUSES = app_config.BYBIT_FUTURE_DELIVERY_STATUSES  # 交割合约状态列表，个数
 DELIVERY_EXCLUDE = app_config.BYBIT_FUTURE_DELIVERY_EXCLUDE  # 交割合约过滤列表，个数
-DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\\d{2}[A-Z]{3}\\d{2}$")  # 交割合约格式，正则
+DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\d{2}[A-Z]{3}\d{2}$")  # 交割合约格式，正则
 SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数
 DEPTH = app_config.ORDERBOOK_DEPTH_FUTURE  # 订单簿深度，档位
 RT_DIR = Path("data/src/bybit_future_orderbook_rt")  # 原始数据目录，路径
@@ -95,7 +95,7 @@ def list_delivery_symbols(start_date: str) -> dict:
                     symbol = item.get("symbol")
                     if symbol and not DELIVERY_SYMBOL_PATTERN.match(symbol):
                         continue
-                    if symbol and not symbol.endswith("USDT"):
+                    if symbol and not symbol.split("-")[0].endswith("USDT"):
                         continue
                     if symbol and symbol not in DELIVERY_EXCLUDE:
                         symbols[symbol] = delivery_time
