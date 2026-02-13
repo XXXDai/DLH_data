@@ -15,7 +15,7 @@
 ## 运行方式
 使用 `tmux` 后台运行，断开终端不影响进程：
 1. 启动会话：`tmux new -s smi`
-2. 运行主程序：`![alt text](image.png)`
+2. 运行主程序：`python3 launcher.py`
 3. 脱离会话但不停止进程：按 `Ctrl-b` 再按 `d`
 4. 重新查看界面：`tmux attach -t smi`
 5. 关闭会话：`tmux kill-session -t smi`
@@ -25,3 +25,4 @@
 
 ## 常用操作
 - 清理数据但保留目录：`/Users/xdai/miniconda3/bin/python /Users/xdai/Documents/projects/Week1/smi/clear_data.py`
+- 校验已下载数据是否符合配置：`python3 validate_data.py`
