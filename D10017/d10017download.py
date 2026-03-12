@@ -347,10 +347,14 @@ def run_symbol(exchange: str, symbol: str) -> None:
         status_update(exchange, "future", symbol, (len(existing_ts), f"日 {latest_existing_date} 准备同步"))
     else:
         status_update(exchange, "future", symbol, (len(existing_ts), f"准备 {start_date}"))
+    log(f"{exchange} {symbol} 开始同步: {latest_existing_date or start_date} -> {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d')}")
     rows = build_rows(exchange, symbol, start_date, existing_ts)
     count = write_rows(file_path, rows)
-    latest_synced_date = rows[-1]["date"] if rows else latest_existing_date or start_date
-    status_update(exchange, "future", symbol, (len(existing_ts) + count, f"日 {latest_synced_date} 已完成"))
+    latest_synced_date = rows[-1]["date"] if rows else latest_existing_date
+    if latest_synced_date:
+        status_update(exchange, "future", symbol, (len(existing_ts) + count, f"日 {latest_synced_date} 已完成"))
+    else:
+        status_update(exchange, "future", symbol, (len(existing_ts) + count, "无可用数据"))
     log(f"{exchange} {symbol} 已写入记录数: {count}")
 
 

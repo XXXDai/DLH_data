@@ -168,7 +168,7 @@ DATASET_START_DATES = {
     "D10013": {
         "bybit": {"BTCUSDT": "2020-03-25", "ETHUSDT": "2020-10-21", "SOLUSDT": "2021-06-29"},  # Bybit期货成交起始日期映射，映射
         "binance": {"BTCUSDT": "2019-09-01", "ETHUSDT": "2019-11-01", "SOLUSDT": "2020-09-01"},  # Binance期货成交起始日期映射，映射
-        "bitget": {"BTCUSDT": "2021-10-01", "ETHUSDT": "2021-10-01", "SOLUSDT": "2021-10-01"},  # Bitget期货成交起始日期映射，映射
+        "bitget": {"BTCUSDT": "2024-04-18", "ETHUSDT": "2024-04-18", "SOLUSDT": "2024-04-18"},  # Bitget期货成交起始日期映射，映射
         "okx": {"BTC-USDT-SWAP": "2021-09-01", "ETH-USDT-SWAP": "2021-09-01", "SOL-USDT-SWAP": "2021-09-01"},  # OKX期货成交起始日期映射，映射
     },  # D10013起始日期矩阵，映射
     "D10014": {
@@ -180,7 +180,7 @@ DATASET_START_DATES = {
     "D10017": {
         "bybit": {"BTCUSDT": "2019-01-01", "ETHUSDT": "2019-01-01", "SOLUSDT": "2021-01-01"},  # Bybit资金费率起始日期映射，映射
         "binance": {"BTCUSDT": "2020-01-01", "ETHUSDT": "2020-01-01", "SOLUSDT": "2020-09-01"},  # Binance资金费率起始日期映射，映射
-        "bitget": {"BTCUSDT": "2021-10-01", "ETHUSDT": "2021-10-01", "SOLUSDT": "2021-10-01"},  # Bitget资金费率起始日期映射，映射
+        "bitget": {"BTCUSDT": "2021-05-18", "ETHUSDT": "2021-05-18", "SOLUSDT": "2021-07-22"},  # Bitget资金费率起始日期映射，映射
         "okx": {"BTC-USDT-SWAP": "2022-02-01", "ETH-USDT-SWAP": "2022-02-01", "SOL-USDT-SWAP": "2022-02-01"},  # OKX资金费率起始日期映射，映射
     },  # D10017起始日期矩阵，映射
 }  # 数据集起始日期矩阵，映射

@@ -475,9 +475,12 @@ def sync_binance_month(symbol: str, missing_dates: list[str], fail_path: Path, s
     for date_str in missing_dates:
         daily_file = f"{symbol}-trades-{date_str}.zip"
         daily_url = f"{BINANCE_BUCKET_URL}/data/spot/daily/trades/{symbol}/{daily_file}"
+        status_update("binance", symbol, (synced_days, f"日 {date_str} 请求中"))
         if download_binance_archive(base_dir, symbol, daily_url, f"binance:{symbol}:day:{date_str}", fail_path):
             synced_days += 1
-        status_update("binance", symbol, (synced_days, f"日 {date_str} {daily_file}"))
+            status_update("binance", symbol, (synced_days, f"日 {date_str} {daily_file}"))
+        else:
+            status_update("binance", symbol, (synced_days, f"失败 {date_str}"))
     return synced_days, True
 
 
@@ -537,15 +540,18 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
             urls = fetch_okx_download_urls(symbol, day_text, day_text, "daily")
         except NetworkRequestError as exc:
             log(f"okx {symbol} {day_text} 日包请求失败，跳过当日: {exc}")
+            status_update("okx", symbol, (synced_days, f"失败 {day_text}"))
             continue
         time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
         if not urls:
-            status_update("okx", symbol, (synced_days, f"日 {day_text} 无文件"))
+            status_update("okx", symbol, (synced_days, f"无文件 {day_text}"))
             continue
         file_name = urls[0].rsplit("/", 1)[-1]
         if download_okx_archive(base_dir, symbol, urls[0], f"okx:{symbol}:day:{day_text}", fail_path):
             synced_days += 1
-        status_update("okx", symbol, (synced_days, f"日 {day_text} {file_name}"))
+            status_update("okx", symbol, (synced_days, f"日 {day_text} {file_name}"))
+        else:
+            status_update("okx", symbol, (synced_days, f"失败 {day_text}"))
     return synced_days, True
 
 
@@ -555,9 +561,12 @@ def sync_bybit_month(symbol: str, missing_dates: list[str], fail_path: Path, syn
     if not base_dir:
         return synced_days, True
     for date_str in missing_dates:
+        status_update("bybit", symbol, (synced_days, f"日 {date_str} 请求中"))
         if download_bybit_day(base_dir, symbol, date_str, fail_path):
             synced_days += 1
-        status_update("bybit", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
+            status_update("bybit", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
+        else:
+            status_update("bybit", symbol, (synced_days, f"失败 {date_str}"))
     return synced_days, True
 
 
@@ -567,9 +576,13 @@ def sync_bitget_month(symbol: str, missing_dates: list[str], fail_path: Path, sy
     if not base_dir:
         return synced_days, True
     for date_str in missing_dates:
+        status_update("bitget", symbol, (synced_days, f"日 {date_str} 请求中"))
+        log(f"bitget {symbol} 请求日包: {date_str}")
         if download_bitget_day(base_dir, symbol, date_str, fail_path):
             synced_days += 1
-        status_update("bitget", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
+            status_update("bitget", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
+        else:
+            status_update("bitget", symbol, (synced_days, f"无文件 {date_str}"))
     return synced_days, True
 
 

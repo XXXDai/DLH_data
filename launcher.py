@@ -273,6 +273,8 @@ def parse_download_status(text: str) -> tuple[str, str, str]:
     if not text:
         return "-", "-", "-"
     parts = text.split()
+    if len(parts) >= 2 and parts[0] in {"失败", "无文件"}:
+        return parts[0], parts[1], "-"
     if len(parts) >= 3 and "/" in parts[0] and len(parts[1]) == 10:
         return parts[0], parts[1], parts[2]
     if len(parts) >= 3 and parts[0] in {"重试", "今日"}:
@@ -358,8 +360,12 @@ def get_synced_until_text(task_id: str, bucket: dict) -> str:
     for value in bucket.values():
         if not (isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float))):
             continue
-        _progress, date_text, _file_name = parse_download_status(str(value[1]))
+        progress_text, date_text, file_name = parse_download_status(str(value[1]))
         if date_text == "-":
+            continue
+        if progress_text in {"失败", "无文件"}:
+            continue
+        if file_name in {"请求中", "无文件"}:
             continue
         if sync_text_sort_key(date_text) >= sync_text_sort_key(latest_text):
             latest_text = date_text
