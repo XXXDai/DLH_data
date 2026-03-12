@@ -421,6 +421,19 @@ class ThreadLogWriter:
         self.pending = pending
         self.status_times = status_times
         self.error_logger = error_logger
+        self.trace_suppressing = {}
+
+    def is_traceback_start(self, line: str) -> bool:
+        """判断是否为异常堆栈起始行。"""
+        return "traceback (most recent call last):" in line.lower()
+
+    def is_exception_summary(self, line: str) -> bool:
+        """判断是否为异常摘要行。"""
+        text = line.strip()
+        if not text or text.startswith("File "):
+            return False
+        head = text.split(":", 1)[0]
+        return head.endswith("Error") or head.endswith("Exception")
 
     def write(self, text: str) -> None:
         if not text:
@@ -440,8 +453,16 @@ class ThreadLogWriter:
         self.pending[task_id] = parts.pop()
         for line in parts:
             if line:
-                self.logs[task_id].append(line)
                 self.error_logger.write(task_id, line)
+                if self.trace_suppressing.get(task_id):
+                    if self.is_exception_summary(line):
+                        self.trace_suppressing[task_id] = False
+                    continue
+                if self.is_traceback_start(line):
+                    self.logs[task_id].append("任务异常，详情见 logs/error.log")
+                    self.trace_suppressing[task_id] = True
+                    continue
+                self.logs[task_id].append(line)
 
     def flush(self) -> None:
         return None

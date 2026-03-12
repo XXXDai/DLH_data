@@ -13,6 +13,7 @@ from cex import cex_config
 from cex.cex_common import build_part_path
 from cex.cex_common import cleanup_stale_part_file
 from cex.cex_common import download_file_from_storage
+from cex.cex_common import is_valid_gzip_file
 from cex.cex_common import list_storage_file_names
 from cex.cex_common import replace_output_file
 from cex.cex_common import seconds_until_next_utc_4h
@@ -142,6 +143,10 @@ def process_date(exchange: str, symbol: str, date_str: str) -> None:
     for input_path in input_paths:
         if input_path.stat().st_size == 0:
             log(f"文件为空: {input_path}")
+            input_path.unlink()
+            return
+        if input_path.name.endswith(".csv.gz") and not is_valid_gzip_file(input_path):
+            log(f"压缩文件损坏，已删除待重下: {input_path}")
             input_path.unlink()
             return
     output_path = build_output_path(output_dir, symbol, date_str)

@@ -20,6 +20,7 @@ from cex import cex_config
 from cex.cex_common import download_bytes
 from cex.cex_common import count_existing_days
 from cex.cex_common import get_synced_until_date
+from cex.cex_common import is_valid_gzip_file
 from cex.cex_common import iter_dates
 from cex.cex_common import iter_months
 from cex.cex_common import list_missing_dates
@@ -125,7 +126,8 @@ def request_okx_json(url: str) -> dict:
         },
     )
     try:
-        req = urlopen(request, timeout=TIMEOUT_SECONDS)
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         raise NetworkRequestError(f"OKX接口请求失败: HTTP {exc.code}") from exc
     except URLError as exc:
@@ -134,10 +136,6 @@ def request_okx_json(url: str) -> dict:
         raise NetworkRequestError("OKX接口请求失败: 超时") from exc
     except socket.timeout as exc:
         raise NetworkRequestError("OKX接口请求失败: 超时") from exc
-    try:
-        return json.loads(req.read().decode("utf-8"))
-    finally:
-        req.close()
 
 
 def build_okx_query_ms(day_text: str) -> int:
@@ -307,6 +305,10 @@ def download_bybit_day(base_dir: Path, symbol: str, date_str: str, fail_path: Pa
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_name(output_path.name + ".part")
     tmp_path.write_bytes(content)
+    if not is_valid_gzip_file(tmp_path):
+        tmp_path.unlink()
+        append_failure(fail_path, f"bybit:{symbol}:{date_str}", "bybit", symbol, date_str, "下载文件损坏")
+        return False
     replace_output_file(tmp_path, output_path)
     clear_failure(fail_path, f"bybit:{symbol}:{date_str}")
     return True
@@ -404,7 +406,8 @@ def download_bitget_bytes(url: str) -> bytes | None:
     """下载Bitget期货成交分片。"""
     request = build_bitget_request(url)
     try:
-        req = urlopen(request, timeout=TIMEOUT_SECONDS)
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return response.read()
     except HTTPError as exc:
         if exc.code in {403, 404}:
             return None
@@ -415,10 +418,6 @@ def download_bitget_bytes(url: str) -> bytes | None:
         raise RuntimeError("下载失败: 超时") from exc
     except socket.timeout as exc:
         raise RuntimeError("下载失败: 超时") from exc
-    try:
-        return req.read()
-    finally:
-        req.close()
 
 
 def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path) -> bool:
@@ -449,6 +448,10 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
             if row_count == 0:
                 clear_failure(fail_path, failure_key)
                 return False
+            if not is_valid_gzip_file(tmp_path):
+                tmp_path.unlink()
+                append_failure(fail_path, failure_key, "bitget", symbol, date_str, "生成文件损坏")
+                return False
             replace_output_file(tmp_path, output_path)
             clear_failure(fail_path, failure_key)
             log(f"bitget {symbol} {date_str} 已写入记录数: {row_count}")
@@ -466,6 +469,10 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
         shard_count += 1
         time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
     if row_count > 0:
+        if not is_valid_gzip_file(tmp_path):
+            tmp_path.unlink()
+            append_failure(fail_path, failure_key, "bitget", symbol, date_str, "生成文件损坏")
+            return False
         replace_output_file(tmp_path, output_path)
         log(f"bitget {symbol} {date_str} 已写入记录数: {row_count}")
         clear_failure(fail_path, failure_key)

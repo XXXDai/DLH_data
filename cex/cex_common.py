@@ -6,6 +6,7 @@ import csv
 import gzip
 import json
 import socket
+import subprocess
 import threading
 import time
 import zipfile
@@ -265,6 +266,9 @@ def download_file_from_storage(file_path: Path) -> bool:
         if code in {"404", "NoSuchKey", "NotFound"}:
             return False
         raise RuntimeError(f"S3下载失败: {code or '未知错误'}") from exc
+    if file_path.name.endswith(".csv.gz") and not is_valid_gzip_file(tmp_path):
+        tmp_path.unlink()
+        return False
     tmp_path.replace(file_path)
     return True
 
@@ -340,6 +344,19 @@ def cleanup_stale_part_file(path: Path) -> bool:
     return False
 
 
+def is_valid_gzip_file(file_path: Path) -> bool:
+    """检查GZip文件是否完整可读。"""
+    return (
+        subprocess.run(
+            ["/usr/bin/gzip", "-t", str(file_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def load_failures(path: Path) -> list:
     """读取失败记录列表。"""
     if not path.exists() or path.stat().st_size == 0:
@@ -388,6 +405,20 @@ def update_failure_file(path: Path, record: dict | None, failure_key: str) -> li
 def write_gzip_csv_rows(file_path: Path, fieldnames: list[str], rows: list[dict], append: bool) -> int:
     """写入Gzip压缩CSV行。"""
     ensure_parent(file_path)
+    if not append:
+        tmp_path = build_part_path(file_path)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        with gzip.open(tmp_path, "wt", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+        if not is_valid_gzip_file(tmp_path):
+            tmp_path.unlink()
+            raise RuntimeError(f"压缩文件校验失败: {file_path}")
+        replace_output_file(tmp_path, file_path)
+        return len(rows)
     mode = "at" if append else "wt"
     write_header = not append or not file_path.exists()
     with gzip.open(file_path, mode, encoding="utf-8", newline="") as f:
