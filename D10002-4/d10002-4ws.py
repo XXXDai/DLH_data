@@ -8,9 +8,7 @@ LOG_HOOK = globals().get("LOG_HOOK")  # 日志回调函数，函数
 
 def run() -> None:
     """运行期货订单簿WS任务。"""
-    orderbook_ws_common.QUIET = QUIET
-    orderbook_ws_common.STATUS_HOOK = STATUS_HOOK
-    orderbook_ws_common.LOG_HOOK = LOG_HOOK
+    orderbook_ws_common.configure_market_runtime("future", QUIET, STATUS_HOOK, LOG_HOOK)
     orderbook_ws_common.run_market_ws("future")
 
 

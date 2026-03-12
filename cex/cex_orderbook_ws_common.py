@@ -36,24 +36,37 @@ DELIVERY_REFRESH_SECONDS = app_config.DELIVERY_REFRESH_SECONDS  # 动态合约�
 QUIET = False  # 静默模式开关，开关
 STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
+MARKET_QUIET = {"future": False, "spot": False}  # 分市场静默开关映射，映射
+MARKET_STATUS_HOOK = {"future": None, "spot": None}  # 分市场状态回调映射，映射
+MARKET_LOG_HOOK = {"future": None, "spot": None}  # 分市场日志回调映射，映射
 
 
 class NetworkRequestError(RuntimeError):
     """表示网络请求失败。"""
 
 
-def log(message: str) -> None:
+def configure_market_runtime(market: str, quiet: bool, status_hook, log_hook) -> None:
+    """配置指定市场的运行时回调。"""
+    MARKET_QUIET[market] = quiet
+    MARKET_STATUS_HOOK[market] = status_hook
+    MARKET_LOG_HOOK[market] = log_hook
+
+
+def log(message: str, market: str | None = None) -> None:
     """输出日志消息。"""
-    if LOG_HOOK:
-        LOG_HOOK(message)
-    if not QUIET:
+    hook = MARKET_LOG_HOOK.get(market) if market else LOG_HOOK
+    quiet = MARKET_QUIET.get(market, QUIET) if market else QUIET
+    if hook:
+        hook(message)
+    if not quiet:
         print(message)
 
 
 def status_update(exchange: str, market: str, symbol: str, value) -> None:
     """更新统一状态键的状态值。"""
-    if STATUS_HOOK:
-        STATUS_HOOK(cex_config.get_status_key(exchange, market, symbol), value)
+    hook = MARKET_STATUS_HOOK.get(market) or STATUS_HOOK
+    if hook:
+        hook(cex_config.get_status_key(exchange, market, symbol), value)
 
 
 def request_json(url: str) -> dict:
@@ -529,15 +542,15 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
         status_update(exchange, market, symbol, (1, "已连接 0"))
     except websocket.WebSocketException as exc:
         status_update(exchange, market, symbol, (0, "连接异常"))
-        log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}")
+        log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}", market)
         return
     except TimeoutError as exc:
         status_update(exchange, market, symbol, (0, "连接超时"))
-        log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}")
+        log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}", market)
         return
     except OSError as exc:
         status_update(exchange, market, symbol, (0, "网络错误"))
-        log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}")
+        log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}", market)
         return
 
     orderbook = {"bids": {}, "asks": {}}
@@ -576,15 +589,15 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
             raw = ws.recv()
         except websocket.WebSocketException as exc:
             status_update(exchange, market, symbol, (0, "连接异常"))
-            log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}")
+            log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}", market)
             break
         except TimeoutError as exc:
             status_update(exchange, market, symbol, (0, "连接超时"))
-            log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}")
+            log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}", market)
             break
         except OSError as exc:
             status_update(exchange, market, symbol, (0, "网络错误"))
-            log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}")
+            log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}", market)
             break
         if raw == "pong":
             continue
@@ -634,7 +647,7 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
 
 def run_symbol_loop(exchange: str, market: str, symbol: str, stop_event: threading.Event) -> None:
     """持续维护单个交易对的WS连接。"""
-    log(f"{exchange} {market} {symbol} 订阅启动")
+    log(f"{exchange} {market} {symbol} 订阅启动", market)
     status_update(exchange, market, symbol, (1, "准备连接"))
     while not stop_event.is_set():
         run_session(exchange, market, symbol, stop_event)
@@ -642,7 +655,7 @@ def run_symbol_loop(exchange: str, market: str, symbol: str, stop_event: threadi
             break
         time.sleep(RECONNECT_INTERVAL_SECONDS)
     status_update(exchange, market, symbol, None)
-    log(f"{exchange} {market} {symbol} 订阅停止")
+    log(f"{exchange} {market} {symbol} 订阅停止", market)
 
 
 def run_exchange_supervisor(exchange: str, market: str) -> None:
@@ -659,7 +672,7 @@ def run_exchange_supervisor(exchange: str, market: str) -> None:
             desired_symbols = resolve_symbols(exchange, market)
         except NetworkRequestError as exc:
             desired_symbols = fallback_symbols
-            log(f"{exchange} {market} 动态合约刷新失败，继续使用静态列表: {exc}")
+            log(f"{exchange} {market} 动态合约刷新失败，继续使用静态列表: {exc}", market)
         desired_set = set(desired_symbols)
         for symbol in sorted(desired_set - set(workers)):
             stop_event = threading.Event()
