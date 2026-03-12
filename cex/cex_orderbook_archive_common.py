@@ -407,9 +407,12 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
             continue
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"重试 {date_str} {file_name}"))
+        log(f"{exchange} {market} {symbol} 重试日包: {date_str}")
         if download_date(exchange, market, symbol, date_str):
             done_count += 1
             existing_dates.add(date_str)
+        else:
+            status_update(exchange, market, symbol, (done_count, f"失败 {date_str}"))
     if end_dt < datetime.strptime(start_date, "%Y-%m-%d"):
         status_update(exchange, market, symbol, (done_count, f"日 {start_date} 已是最新"))
         return
@@ -418,14 +421,25 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         synced_until = get_synced_until_date(existing_dates, start_date, end_date) or end_date
         status_update(exchange, market, symbol, (done_count, f"日 {synced_until} 已是最新"))
         return
+    next_date = date_list[0]
+    if done_count > 0:
+        synced_until = get_synced_until_date(existing_dates, start_date, end_date)
+        if synced_until:
+            status_update(exchange, market, symbol, (done_count, f"日 {synced_until} 准备回补"))
+    else:
+        status_update(exchange, market, symbol, (done_count, f"准备 {next_date}"))
+    log(f"{exchange} {market} {symbol} 开始回补: {next_date} -> {end_date}")
     total = len(date_list)
     for index, date_str in enumerate(date_list, 1):
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
-        status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} {file_name}"))
+        status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} 请求中"))
+        log(f"{exchange} {market} {symbol} 请求日包: {date_str}")
         if download_date(exchange, market, symbol, date_str):
             done_count += 1
             existing_dates.add(date_str)
             status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} {file_name}"))
+        else:
+            status_update(exchange, market, symbol, (done_count, f"失败 {date_str}"))
 
 
 def resolve_symbols(exchange: str, market: str) -> list[str]:
