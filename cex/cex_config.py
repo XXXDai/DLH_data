@@ -437,7 +437,19 @@ def is_exchange_enabled(exchange: str) -> bool:
 
 def merge_symbols(base_symbols: list, extra_symbols: list) -> list:
     """合并交易对列表并去重排序。"""
-    return sorted(set(base_symbols) | set(extra_symbols))
+    merged = []
+    seen = set()
+    for symbol in base_symbols:
+        if symbol in seen:
+            continue
+        merged.append(symbol)
+        seen.add(symbol)
+    for symbol in sorted(extra_symbols):
+        if symbol in seen:
+            continue
+        merged.append(symbol)
+        seen.add(symbol)
+    return merged
 
 
 def get_spot_symbols(exchange: str) -> list:

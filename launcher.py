@@ -277,6 +277,8 @@ def parse_download_status(text: str) -> tuple[str, str, str]:
         return parts[0], parts[1], parts[2]
     if len(parts) >= 3 and parts[0] in {"重试", "今日"}:
         return parts[0], parts[1], parts[2]
+    if len(parts) >= 3 and parts[0] in {"月", "日"}:
+        return parts[0], parts[1], parts[2]
     if len(parts) >= 2 and parts[0] == "对齐等待":
         return "对齐", "-", parts[1]
     if text == "已对齐":
@@ -663,7 +665,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 elif current.task_id in {"D10017", "D10018", "D10019"}:
                     title = "同步状态"
                 else:
-                    title = "下载状态"
+                    title = f"下载状态（已同步天数总计: {numeric_total}）"
                 for key in sorted(counts):
                     value = counts[key]
                     display_key = simplify_status_key(current_exchange, key)
@@ -694,7 +696,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 total = len(status_items)
                 status_header = None
                 if current.task_id in {"D10001", "D10005", "D10013", "D10014"}:
-                    status_header = ("对象", "完成", "进度", "日期", "文件名")
+                    status_header = ("对象", "已同步天数", "进度", "日期", "文件名")
                 header_rows = 1 if status_header else 0
                 max_status_rows = max(0, min(total, max(4, list_height // 2)))
                 status_height = min(total, max(0, max_status_rows - header_rows))
