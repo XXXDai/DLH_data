@@ -3,7 +3,10 @@ from pathlib import Path
 import csv
 from decimal import Decimal
 import json
+import socket
 import threading
+from urllib.error import HTTPError
+from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request
 from urllib.request import urlopen
@@ -12,6 +15,7 @@ import app_config
 from cex import cex_config
 from cex.cex_common import seconds_until_next_utc_midnight
 from cex.cex_common import upload_file_to_s3
+from cex.cex_orderbook_ws_common import NetworkRequestError
 
 
 DATASET_ID = "D10018"  # 数据集标识，字符串
@@ -55,8 +59,17 @@ def build_file_path(base_dir: Path, symbol: str) -> Path:
 def request_json(url: str) -> dict:
     """请求JSON响应。"""
     request = Request(url, headers={"User-Agent": HTTP_HEADER_USER_AGENT})
-    with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise NetworkRequestError(f"接口请求失败: HTTP {exc.code}") from exc
+    except URLError as exc:
+        raise NetworkRequestError("接口请求失败: 网络错误") from exc
+    except TimeoutError as exc:
+        raise NetworkRequestError("接口请求失败: 超时") from exc
+    except socket.timeout as exc:
+        raise NetworkRequestError("接口请求失败: 超时") from exc
 
 
 def format_date_fields(ts_ms: int) -> tuple[str, str, str]:
@@ -284,7 +297,12 @@ def run_bybit() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for coin in cex_config.get_insurance_symbols(exchange):
-        rows = fetch_bybit_rows(coin)
+        try:
+            rows = fetch_bybit_rows(coin)
+        except NetworkRequestError as exc:
+            status_update(exchange, "insurance", coin, f"失败 {exc}")
+            log(f"{exchange} {coin} 同步失败: {exc}")
+            continue
         count = append_rows(build_file_path(base_dir, coin), rows)
         status_update(exchange, "insurance", coin, count)
         log(f"{exchange} {coin} 已写入记录数: {count}")
@@ -299,7 +317,12 @@ def run_binance() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
-        rows = fetch_binance_rows(symbol)
+        try:
+            rows = fetch_binance_rows(symbol)
+        except NetworkRequestError as exc:
+            status_update(exchange, "insurance", symbol, f"失败 {exc}")
+            log(f"{exchange} {symbol} 同步失败: {exc}")
+            continue
         count = append_rows(build_file_path(base_dir, symbol), rows)
         status_update(exchange, "insurance", symbol, count)
         log(f"{exchange} {symbol} 已写入记录数: {count}")
@@ -314,7 +337,12 @@ def run_bitget() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
-        rows = fetch_bitget_rows(symbol)
+        try:
+            rows = fetch_bitget_rows(symbol)
+        except NetworkRequestError as exc:
+            status_update(exchange, "insurance", symbol, f"失败 {exc}")
+            log(f"{exchange} {symbol} 同步失败: {exc}")
+            continue
         count = append_rows(build_file_path(base_dir, symbol), rows)
         status_update(exchange, "insurance", symbol, count)
         log(f"{exchange} {symbol} 已写入记录数: {count}")
@@ -329,7 +357,12 @@ def run_okx() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
-        rows = fetch_okx_rows(symbol)
+        try:
+            rows = fetch_okx_rows(symbol)
+        except NetworkRequestError as exc:
+            status_update(exchange, "insurance", symbol, f"失败 {exc}")
+            log(f"{exchange} {symbol} 同步失败: {exc}")
+            continue
         count = append_rows(build_file_path(base_dir, symbol), rows)
         status_update(exchange, "insurance", symbol, count)
         log(f"{exchange} {symbol} 已写入记录数: {count}")
