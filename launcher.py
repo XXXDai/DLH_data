@@ -733,7 +733,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 counts = get_status_bucket_for_exchange(current.task_id, current_exchange, status_counts)
                 numeric_total = get_total_count(counts)
                 if current.task_id in {"D10002-4", "D10006-8"}:
-                    title = f"订阅计数（总计: {numeric_total}）"
+                    title = f"订阅状态（在线数: {numeric_total}）"
                 elif current.task_id in {"D10017", "D10018", "D10019"}:
                     title = "同步状态"
                 else:

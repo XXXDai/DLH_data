@@ -526,13 +526,17 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
     try:
         ws = connect_ws(ws_url)
         send_subscribe(ws, exchange, market, symbol, depth)
+        status_update(exchange, market, symbol, (1, "已连接 0"))
     except websocket.WebSocketException as exc:
+        status_update(exchange, market, symbol, (0, "连接异常"))
         log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}")
         return
     except TimeoutError as exc:
+        status_update(exchange, market, symbol, (0, "连接超时"))
         log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}")
         return
     except OSError as exc:
+        status_update(exchange, market, symbol, (0, "网络错误"))
         log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}")
         return
 
@@ -571,12 +575,15 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
         try:
             raw = ws.recv()
         except websocket.WebSocketException as exc:
+            status_update(exchange, market, symbol, (0, "连接异常"))
             log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}")
             break
         except TimeoutError as exc:
+            status_update(exchange, market, symbol, (0, "连接超时"))
             log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}")
             break
         except OSError as exc:
+            status_update(exchange, market, symbol, (0, "网络错误"))
             log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}")
             break
         if raw == "pong":
@@ -584,7 +591,7 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
         recv_count += 1
         now_status_ts = time.monotonic()
         if now_status_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
-            status_update(exchange, market, symbol, recv_count)
+            status_update(exchange, market, symbol, (1, f"消息 {recv_count}"))
             last_status_ts = now_status_ts
         collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
         message = json.loads(raw)
@@ -628,6 +635,7 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
 def run_symbol_loop(exchange: str, market: str, symbol: str, stop_event: threading.Event) -> None:
     """持续维护单个交易对的WS连接。"""
     log(f"{exchange} {market} {symbol} 订阅启动")
+    status_update(exchange, market, symbol, (1, "准备连接"))
     while not stop_event.is_set():
         run_session(exchange, market, symbol, stop_event)
         if stop_event.is_set():
