@@ -359,7 +359,7 @@ def filter_logs_for_exchange(log_lines: list, exchange: str) -> list:
             continue
         if not any(name in lower_line for name in exchange_names):
             filtered.append(line)
-    return filtered or log_lines
+    return filtered
 
 
 def filter_logs_for_status(log_lines: list, exchange: str, status_key: str) -> list:
@@ -369,7 +369,7 @@ def filter_logs_for_status(log_lines: list, exchange: str, status_key: str) -> l
     if strict:
         return strict
     fuzzy = [line for line in log_lines if symbol_text in line]
-    return fuzzy or log_lines
+    return fuzzy
 
 
 def build_tasks():
@@ -824,6 +824,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 log_start += 1
             visible_lines = footer_row - log_start
             tail_lines = log_lines[-visible_lines:] if visible_lines > 0 else []
+            if visible_lines > 0 and not tail_lines:
+                draw_clipped_text(stdscr, log_start, log_col, "当前交易所暂无匹配日志", right_width, warm_attr)
             for idx, line in enumerate(tail_lines):
                 text = line
                 target_row = log_start + idx
