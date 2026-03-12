@@ -292,7 +292,7 @@ def group_tasks_by_exchange(tasks: list) -> tuple[list[str], dict]:
     """按交易所归类任务列表。"""
     grouped = {}
     for exchange in cex_config.list_exchanges():
-        grouped[exchange] = [task for task in tasks if cex_config.is_supported(task.task_id, exchange)]
+        grouped[exchange] = list(tasks)
     exchanges = [exchange for exchange in cex_config.list_exchanges() if grouped.get(exchange)]
     return exchanges, grouped
 
@@ -677,13 +677,19 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             item_index = task_scroll + idx
             if row >= task_rule_row:
                 break
-            status = "运行中" if task.is_running() else "已退出"
+            if cex_config.is_supported(task.task_id, current_exchange):
+                status = "运行中" if task.is_running() else "已退出"
+            else:
+                status = cex_config.UNSUPPORTED_STATUS_TEXT
             counts = get_status_bucket_for_exchange(task.task_id, current_exchange, status_counts)
             total_count = get_total_count(counts)
             synced_until_text = get_synced_until_text(task.task_id, counts)
             last_text = get_last_update_text(task.task_id, current_exchange, counts, status_times, status_meta)
             selected_attr = focus_attr if item_index == task_selected[current_exchange] and focus == "tasks" else 0
-            status_attr = ok_attr if task.is_running() else bad_attr
+            if status == cex_config.UNSUPPORTED_STATUS_TEXT:
+                status_attr = header_attr
+            else:
+                status_attr = ok_attr if task.is_running() else bad_attr
             draw_clipped_text(stdscr, row, 0, ">" if item_index == task_selected[current_exchange] else " ", 1, selected_attr)
             draw_clipped_text(stdscr, row, 2, pad_to_cells(task.name, name_cells), name_cells, selected_attr)
             draw_clipped_text(stdscr, row, 2 + name_cells + 1, pad_to_cells(status, 6), 6, selected_attr | status_attr)
