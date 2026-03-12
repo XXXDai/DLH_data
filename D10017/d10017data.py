@@ -2,7 +2,7 @@ from datetime import datetime
 from pathlib import Path
 import csv
 
-DATA_DIR = Path("data/src/bybit_future_fundingrate_di")  # 数据目录，路径
+DATA_DIR = Path("data/dylan/src/bybit_future_fundingrate_di")  # 数据目录，路径
 SYMBOL = "BTCUSDT"  # 交易对，字符串
 START_DATE = "2026-01-15"  # 开始日期，日期
 END_DATE = "2026-01-20"  # 结束日期，日期

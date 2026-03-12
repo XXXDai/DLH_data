@@ -1,395 +1,533 @@
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from io import BytesIO, TextIOWrapper
 from pathlib import Path
+import csv
 import json
-import importlib
-import shutil
+import re
 import socket
 import threading
 import time
-import sys
+import zipfile
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlencode
+from urllib.request import Request
 from urllib.request import urlopen
-from tqdm import tqdm
 
-ROOT_DIR = Path(__file__).resolve().parents[1]  # 项目根目录，路径
-if str(ROOT_DIR) not in sys.path:
-    sys.path.append(str(ROOT_DIR))
-app_config = importlib.import_module("app_config")  # 项目配置模块，模块
+import app_config
+from cex import cex_config
+from cex.cex_common import download_bytes
+from cex.cex_common import iter_dates
+from cex.cex_common import month_end
+from cex.cex_common import replace_output_file
+from cex.cex_common import seconds_until_next_utc_4h
+from cex.cex_common import update_failure_file
+from cex.cex_common import write_gzip_csv_rows
+from cex.cex_orderbook_ws_common import NetworkRequestError
+from cex.cex_trade_common import NORMALIZED_TRADE_FIELDS
+from cex.cex_trade_common import normalize_binance_spot_parts
+from cex.cex_trade_common import normalize_okx_trade_row
 
-BASE_URL = "https://public.bybit.com/spot"  # 下载根地址，字符串
-SYMBOLS = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)  # 交易对列表，个数
-START_DATE = app_config.D10014_START_DATE  # 起始日期（含），日期
-DATA_DIR = Path("data/src/bybit_spot_trade_di")  # 保存目录，路径
+
+DATASET_ID = "D10014"  # 数据集标识，字符串
+FAIL_LOG_DIR = Path("D10014")  # 失败日志目录，路径
 TIMEOUT_SECONDS = app_config.DOWNLOAD_TIMEOUT_SECONDS  # 请求超时，秒
-RETRY_TIMES = app_config.RETRY_TIMES  # 最大重试次数，次
-RETRY_INTERVAL_SECONDS = app_config.RETRY_INTERVAL_SECONDS  # 重试间隔，秒
-CHUNK_SIZE = app_config.CHUNK_SIZE  # 下载块大小，字节
-DOWNLOAD_CONCURRENCY = app_config.DOWNLOAD_CONCURRENCY  # 下载并发数，个数
-DOWNLOAD_SEMAPHORE = threading.Semaphore(DOWNLOAD_CONCURRENCY)  # 下载并发信号量，个数
-LOOP_INTERVAL_SECONDS = app_config.LOOP_INTERVAL_SECONDS  # 循环间隔，秒
-FAIL_LOG_DIR = Path("D10014")  # 失败记录目录，路径
+BYBIT_BASE_URL = "https://public.bybit.com/spot"  # Bybit现货成交根地址，字符串
+BINANCE_BUCKET_URL = "https://data.binance.vision"  # Binance公共数据根地址，字符串
+BITGET_SPOT_BASE_URL = "https://img.bitgetimg.com/online/trades/SPBL"  # Bitget现货成交根地址，字符串
+OKX_MARKET_HISTORY_URL = "https://www.okx.com/api/v5/public/market-data-history"  # OKX历史市场数据接口地址，字符串
+OKX_MODULE_1_DATE_TZ_OFFSET_HOURS = 8  # OKX模块1时间偏移，小时
+HTTP_HEADER_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"  # 通用请求头浏览器标识，字符串
+HTTP_HEADER_ACCEPT_JSON = "application/json, text/plain, */*"  # JSON请求头可接受类型，字符串
+HTTP_HEADER_ACCEPT_ALL = "*/*"  # 文件请求头可接受类型，字符串
+HTTP_HEADER_ACCEPT_LANGUAGE = "en-US,en;q=0.9"  # 请求头语言偏好，字符串
+HTTP_HEADER_OKX_REFERER = "https://www.okx.com/"  # OKX请求头来源地址，字符串
+HTTP_HEADER_OKX_ORIGIN = "https://www.okx.com"  # OKX请求头来源域名，字符串
+HTTP_HEADER_BITGET_REFERER = "https://www.bitget.com/"  # Bitget请求头来源地址，字符串
+HTTP_HEADER_BITGET_ORIGIN = "https://www.bitget.com"  # Bitget请求头来源域名，字符串
+REQUEST_MIN_INTERVAL_SECONDS = 0.2  # 接口最小请求间隔，秒
+BITGET_MAX_FILE_INDEX = 256  # Bitget单日最大分片数，个
+BITGET_ARCHIVE_NAME_PATTERN = re.compile(r"^(\d{8})_\d{3}\.zip$")  # Bitget归档文件名格式，正则
 QUIET = False  # 静默模式开关，开关
 STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
-FAIL_LOCK = threading.Lock()  # 失败记录锁，锁
-ALIGN_LOCK = threading.Lock()  # 启动对齐锁，锁
-ALIGN_LOGGED = False  # 启动对齐日志标记，开关
 
 
 def log(message: str) -> None:
+    """输出日志消息。"""
     if LOG_HOOK:
         LOG_HOOK(message)
     if not QUIET:
         print(message)
 
-def status_update(symbol: str, done_count: int, text: str) -> None:
+
+def status_update(exchange: str, symbol: str, value) -> None:
+    """更新现货成交状态。"""
     if STATUS_HOOK:
-        STATUS_HOOK(symbol, (done_count, text))
-
-
-def seconds_until_next_utc_midnight() -> int:
-    now = datetime.now(tz=timezone.utc)
-    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    seconds = int((next_midnight - now).total_seconds())
-    return seconds if seconds > 0 else 1
-
-
-def seconds_until_next_utc_4h() -> int:
-    now = datetime.now(tz=timezone.utc)
-    hour_block = (now.hour // 4 + 1) * 4
-    if hour_block >= 24:
-        next_dt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    else:
-        next_dt = now.replace(hour=hour_block, minute=0, second=0, microsecond=0)
-    seconds = int((next_dt - now).total_seconds())
-    return seconds if seconds > 0 else 1
-
-
-def align_to_utc_4h_boundary(symbol: str, done_count: int) -> None:
-    now = datetime.now(tz=timezone.utc)
-    if now.hour % 4 == 0 and now.minute == 0 and now.second == 0:
-        status_update(symbol, done_count, "已对齐")
-        return
-    sleep_seconds = seconds_until_next_utc_4h()
-    status_update(symbol, done_count, f"对齐等待 {sleep_seconds}s")
-    global ALIGN_LOGGED
-    with ALIGN_LOCK:
-        if not ALIGN_LOGGED:
-            log(f"启动对齐，等待 {sleep_seconds} 秒后执行（UTC 4小时倍数）")
-            ALIGN_LOGGED = True
-    time.sleep(sleep_seconds)
-    status_update(symbol, done_count, "已对齐")
+        STATUS_HOOK(cex_config.get_status_key(exchange, "spot", symbol), value)
 
 
 def build_fail_log_path() -> Path:
+    """构造失败日志路径。"""
     return FAIL_LOG_DIR / "download_failures.json"
 
 
-def build_url(base_url: str, symbol: str, date_str: str) -> str:
-    return f"{base_url}/{symbol}/{symbol}_{date_str}.csv.gz"
-
-
 def build_output_path(base_dir: Path, symbol: str, date_str: str) -> Path:
-    file_name = f"{symbol}_{date_str}.csv.gz"
-    return base_dir / symbol / file_name
+    """构造输出文件路径。"""
+    return base_dir / symbol / f"{symbol}_{date_str}.csv.gz"
 
 
-def next_date(date_str: str) -> str:
-    dt = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)
-    return dt.strftime("%Y-%m-%d")
+def build_bitget_output_path(base_dir: Path, symbol: str, shard_name: str) -> Path:
+    """构造Bitget原始分片路径。"""
+    return base_dir / symbol / shard_name
 
 
-def parse_date_from_name(symbol: str, name: str) -> str | None:
-    prefix = f"{symbol}_"
-    if not name.startswith(prefix) or not name.endswith(".csv.gz"):
-        return None
-    date_str = name[len(prefix) : -len(".csv.gz")]
+def append_failure(fail_path: Path, failure_key: str, exchange: str, symbol: str, target: str, message: str) -> None:
+    """记录失败项。"""
+    update_failure_file(
+        fail_path,
+        {
+            "键": failure_key,
+            "交易所": exchange,
+            "交易对": symbol,
+            "目标": target,
+            "错误信息": message,
+            "记录时间": datetime.now(tz=timezone.utc).isoformat(),
+        },
+        failure_key,
+    )
+
+
+def clear_failure(fail_path: Path, failure_key: str) -> None:
+    """清理失败项。"""
+    update_failure_file(fail_path, None, failure_key)
+
+
+def request_okx_json(url: str) -> dict:
+    """请求OKX公共JSON接口。"""
+    request = Request(
+        url,
+        headers={
+            "User-Agent": HTTP_HEADER_USER_AGENT,
+            "Accept": HTTP_HEADER_ACCEPT_JSON,
+            "Accept-Language": HTTP_HEADER_ACCEPT_LANGUAGE,
+            "Referer": HTTP_HEADER_OKX_REFERER,
+            "Origin": HTTP_HEADER_OKX_ORIGIN,
+        },
+    )
     try:
-        datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
-        return None
-    return date_str
+        req = urlopen(request, timeout=TIMEOUT_SECONDS)
+    except HTTPError as exc:
+        raise NetworkRequestError(f"OKX接口请求失败: HTTP {exc.code}") from exc
+    except URLError as exc:
+        raise NetworkRequestError("OKX接口请求失败: 网络错误") from exc
+    except TimeoutError as exc:
+        raise NetworkRequestError("OKX接口请求失败: 超时") from exc
+    except socket.timeout as exc:
+        raise NetworkRequestError("OKX接口请求失败: 超时") from exc
+    try:
+        return json.loads(req.read().decode("utf-8"))
+    finally:
+        req.close()
 
 
-def get_latest_local_date(symbol: str) -> str | None:
-    symbol_dir = DATA_DIR / symbol
+def build_bitget_request(url: str) -> Request:
+    """构造Bitget下载请求。"""
+    return Request(
+        url,
+        headers={
+            "User-Agent": HTTP_HEADER_USER_AGENT,
+            "Accept": HTTP_HEADER_ACCEPT_ALL,
+            "Accept-Language": HTTP_HEADER_ACCEPT_LANGUAGE,
+            "Referer": HTTP_HEADER_BITGET_REFERER,
+            "Origin": HTTP_HEADER_BITGET_ORIGIN,
+        },
+    )
+
+
+def download_bitget_bytes(url: str) -> bytes | None:
+    """下载Bitget归档字节内容。"""
+    request = build_bitget_request(url)
+    try:
+        req = urlopen(request, timeout=TIMEOUT_SECONDS)
+    except HTTPError as exc:
+        if exc.code in {403, 404}:
+            return None
+        raise RuntimeError(f"下载失败: HTTP {exc.code}") from exc
+    except URLError as exc:
+        raise RuntimeError("下载失败: 网络错误") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("下载失败: 超时") from exc
+    except socket.timeout as exc:
+        raise RuntimeError("下载失败: 超时") from exc
+    try:
+        return req.read()
+    finally:
+        req.close()
+
+
+def build_okx_query_ms(day_text: str) -> int:
+    """构造OKX查询起始毫秒时间戳。"""
+    dt = datetime.strptime(day_text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000) - OKX_MODULE_1_DATE_TZ_OFFSET_HOURS * 3600 * 1000
+
+
+def build_okx_query_range(start_day: str, end_day: str) -> tuple[int, int]:
+    """构造OKX查询时间范围。"""
+    begin_ms = build_okx_query_ms(start_day)
+    next_day = (datetime.strptime(end_day, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    end_ms = build_okx_query_ms(next_day) - 1
+    return begin_ms, end_ms
+
+
+def get_latest_local_date(base_dir: Path, symbol: str) -> str | None:
+    """获取本地最新日期。"""
+    symbol_dir = base_dir / symbol
     if not symbol_dir.exists():
         return None
-    latest = None
+    dates = []
     for path in symbol_dir.glob(f"{symbol}_*.csv.gz"):
-        date_str = parse_date_from_name(symbol, path.name)
-        if not date_str:
-            continue
-        latest = date_str if latest is None else max(latest, date_str)
-    return latest
-
-
-def extract_symbol_from_url(url: str) -> str | None:
-    parts = [item for item in urlparse(url).path.split("/") if item]
-    return parts[-2] if len(parts) >= 2 else None
-
-
-def iter_dates(start_date: str, end_date: str):
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    current = start
-    while current <= end:
-        yield current.strftime("%Y-%m-%d")
-        current += timedelta(days=1)
-
-
-def download_file(url: str, dest_path: Path) -> tuple[int | None, str | None]:
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = dest_path.with_name(dest_path.name + ".part")
-    last_error = None
-    for attempt in range(1, RETRY_TIMES + 1):
+        date_str = path.name.removesuffix(".csv.gz")[-10:]
         try:
-            with DOWNLOAD_SEMAPHORE:
-                with urlopen(url, timeout=TIMEOUT_SECONDS) as response:
-                    length = response.getheader("Content-Length")
-                    total_size = int(length) if length and length.isdigit() else None
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-                    with tmp_path.open("wb") as f:
-                        with tqdm(
-                            total=total_size,
-                            unit="B",
-                            unit_scale=True,
-                            unit_divisor=1024,
-                            desc="下载",
-                            disable=QUIET,
-                        ) as pbar:
-                            while True:
-                                chunk = response.read(CHUNK_SIZE)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                pbar.update(len(chunk))
-            downloaded_size = tmp_path.stat().st_size
-            if downloaded_size == 0:
-                last_error = "下载为空: 0字节"
-                log(f"下载失败，下载为空，重试{attempt}/{RETRY_TIMES}: 0字节")
-                tmp_path.unlink()
-                continue
-            if total_size is not None and downloaded_size != total_size:
-                last_error = f"下载不完整: {downloaded_size}/{total_size}"
-                log(f"下载失败，下载不完整，重试{attempt}/{RETRY_TIMES}: {downloaded_size}/{total_size}")
-                tmp_path.unlink()
-                continue
-            tmp_path.replace(dest_path)
-            return downloaded_size, None
-        except (TimeoutError, socket.timeout) as exc:
-            last_error = f"超时错误: {exc}"
-            log(f"下载失败，超时错误，重试{attempt}/{RETRY_TIMES}: {exc}")
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except HTTPError as exc:
-            last_error = f"HTTP错误: {exc}"
-            if exc.code == 404:
-                log(f"下载失败，HTTP错误404，不重试: {exc}")
-                if tmp_path.exists():
-                    tmp_path.unlink()
-                return None, last_error
-            log(f"下载失败，HTTP错误，重试{attempt}/{RETRY_TIMES}: {exc}")
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except URLError as exc:
-            last_error = f"网络错误: {exc}"
-            log(f"下载失败，网络错误，重试{attempt}/{RETRY_TIMES}: {exc}")
-            if tmp_path.exists():
-                tmp_path.unlink()
-        if attempt < RETRY_TIMES:
-            backoff = RETRY_INTERVAL_SECONDS * (2 ** (attempt - 1))
-            jitter = time.time() % 1
-            time.sleep(min(60, backoff) + jitter)
-    return None, last_error
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            continue
+        dates.append(date_str)
+    return max(dates) if dates else None
 
 
-def load_failures(path: Path) -> list:
-    with FAIL_LOCK:
-        return load_failures_unlocked(path)
+def get_latest_bitget_local_date(base_dir: Path, symbol: str) -> str | None:
+    """获取Bitget本地最新日期。"""
+    symbol_dir = base_dir / symbol
+    if not symbol_dir.exists():
+        return None
+    dates = []
+    for path in symbol_dir.glob("*.zip"):
+        matched = BITGET_ARCHIVE_NAME_PATTERN.match(path.name)
+        if not matched:
+            continue
+        raw_date = matched.group(1)
+        date_str = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+        dates.append(date_str)
+    return max(dates) if dates else None
 
 
-def load_failures_unlocked(path: Path) -> list:
-    if not path.exists():
-        return []
-    if path.stat().st_size == 0:
-        return []
-    text = path.read_text(encoding="utf-8")
-    stripped = text.strip()
-    if not stripped:
-        return []
-    if not stripped.startswith("[") or not stripped.endswith("]"):
-        return []
-    data = json.loads(stripped)
-    return data if isinstance(data, list) else []
-
-
-def save_failures(path: Path, failures: list) -> None:
-    with FAIL_LOCK:
-        save_failures_unlocked(path, failures)
-
-
-def save_failures_unlocked(path: Path, failures: list) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    tmp_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
-
-
-def upsert_failure(failures: list, record: dict) -> None:
-    for idx, item in enumerate(failures):
-        if item.get("url") == record.get("url"):
-            failures[idx].update(record)
-            return
-    failures.append(record)
-
-
-def remove_failure(failures: list, url: str) -> None:
-    failures[:] = [item for item in failures if item.get("url") != url]
-
-
-def has_failure(failures: list, url: str) -> bool:
-    return any(item.get("url") == url for item in failures)
-
-
-def update_failures_file(path: Path, record: dict | None, url: str) -> list:
-    with FAIL_LOCK:
-        failures = load_failures_unlocked(path)
-        if record is None:
-            remove_failure(failures, url)
-        else:
-            upsert_failure(failures, record)
-        save_failures_unlocked(path, failures)
-        return failures
-
-
-def download_by_url(url: str, date_str: str, symbol: str, fail_path: Path, failures: list) -> bool:
-    dest_path = build_output_path(DATA_DIR, symbol, date_str)
-    if dest_path.exists() and dest_path.stat().st_size > 0:
-        failures[:] = update_failures_file(fail_path, None, url)
-        log(f"已存在，跳过下载: {dest_path}")
+def download_bybit_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path) -> bool:
+    """下载Bybit单日现货成交文件。"""
+    output_path = build_output_path(base_dir, symbol, date_str)
+    if output_path.exists():
+        clear_failure(fail_path, f"bybit:{symbol}:{date_str}")
         return True
-    size, error_message = download_file(url, dest_path)
-    if size is None:
-        record = {
-            "日期": date_str,
-            "交易对": symbol,
-            "url": url,
-            "错误信息": error_message,
-            "重试次数": RETRY_TIMES,
-            "记录时间": datetime.now().isoformat(),
-        }
-        failures[:] = update_failures_file(fail_path, record, url)
-        log(f"下载失败已记录: {date_str}")
+    url = f"{BYBIT_BASE_URL}/{symbol}/{symbol}_{date_str}.csv.gz"
+    try:
+        content = download_bytes(url, TIMEOUT_SECONDS)
+    except RuntimeError as exc:
+        append_failure(fail_path, f"bybit:{symbol}:{date_str}", "bybit", symbol, date_str, str(exc))
         return False
-    failures[:] = update_failures_file(fail_path, None, url)
-    log(f"已下载: {dest_path}，大小: {size} 字节")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(output_path.name + ".part")
+    tmp_path.write_bytes(content)
+    replace_output_file(tmp_path, output_path)
+    clear_failure(fail_path, f"bybit:{symbol}:{date_str}")
     return True
 
 
-def run_initial_range(start_date: str, symbol: str, failures: list, fail_path: Path, done_count: int) -> tuple[set, int]:
-    end_date = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    dates = list(iter_dates(start_date, end_date))
-    total_days = len(dates)
-    log(f"{symbol} 总天数: {total_days}")
-    attempted = set()
-    for idx, date_str in enumerate(dates, 1):
-        url = build_url(BASE_URL, symbol, date_str)
-        file_name = Path(urlparse(url).path).name
-        log(f"{symbol} 日期进度: {idx}/{total_days} {date_str} 正在获取: {file_name}")
-        status_update(symbol, done_count, f"{idx}/{total_days} {date_str} {file_name}")
-        attempted.add(url)
-        if download_by_url(url, date_str, symbol, fail_path, failures):
-            done_count += 1
-            status_update(symbol, done_count, f"{idx}/{total_days} {date_str} {file_name}")
-    return attempted, done_count
-
-
-def retry_failures(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
-    if not failures:
-        return done_count
-    log(f"{symbol} 失败重试数: {len(failures)}")
-    for item in list(failures):
-        url = item.get("url")
-        if not url:
+def write_daily_rows(base_dir: Path, symbol: str, rows_by_date: dict) -> int:
+    """按日写入标准化成交文件。"""
+    total = 0
+    for date_str, rows in rows_by_date.items():
+        output_path = build_output_path(base_dir, symbol, date_str)
+        if output_path.exists():
             continue
-        url_symbol = extract_symbol_from_url(url)
-        if url_symbol and url_symbol != symbol:
+        total += write_gzip_csv_rows(output_path, NORMALIZED_TRADE_FIELDS, rows, False)
+    return total
+
+
+def split_binance_zip(content: bytes, symbol: str, base_dir: Path) -> int:
+    """拆分Binance压缩成交文件。"""
+    rows_by_date = defaultdict(list)
+    with zipfile.ZipFile(BytesIO(content), "r") as zf:
+        name = zf.namelist()[0]
+        with zf.open(name) as f:
+            reader = csv.reader(TextIOWrapper(f, encoding="utf-8"))
+            for parts in reader:
+                normalized = normalize_binance_spot_parts(symbol, parts)
+                if normalized:
+                    date_str, row = normalized
+                    rows_by_date[date_str].append(row)
+    return write_daily_rows(base_dir, symbol, rows_by_date)
+
+
+def split_okx_zip(content: bytes, symbol: str, base_dir: Path) -> int:
+    """拆分OKX压缩成交文件。"""
+    rows_by_date = defaultdict(list)
+    with zipfile.ZipFile(BytesIO(content), "r") as zf:
+        name = zf.namelist()[0]
+        with zf.open(name) as f:
+            reader = csv.DictReader(TextIOWrapper(f, encoding="utf-8"))
+            for row in reader:
+                normalized = normalize_okx_trade_row(row)
+                if normalized:
+                    date_str, item = normalized
+                    rows_by_date[date_str].append(item)
+    return write_daily_rows(base_dir, symbol, rows_by_date)
+
+
+def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
+    """下载并拆分Binance成交归档。"""
+    try:
+        content = download_bytes(url, TIMEOUT_SECONDS)
+    except RuntimeError as exc:
+        append_failure(fail_path, failure_key, "binance", symbol, url, str(exc))
+        return False
+    count = split_binance_zip(content, symbol, base_dir)
+    clear_failure(fail_path, failure_key)
+    log(f"binance {symbol} 已写入记录数: {count}")
+    return True
+
+
+def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
+    """下载并拆分OKX成交归档。"""
+    try:
+        content = download_bytes(url, TIMEOUT_SECONDS)
+    except RuntimeError as exc:
+        append_failure(fail_path, failure_key, "okx", symbol, url, str(exc))
+        return False
+    count = split_okx_zip(content, symbol, base_dir)
+    clear_failure(fail_path, failure_key)
+    log(f"okx {symbol} 已写入记录数: {count}")
+    return True
+
+
+def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path) -> bool:
+    """下载Bitget单日现货成交分片。"""
+    failure_key = f"bitget:{symbol}:{date_str}"
+    output_dir = base_dir / symbol
+    output_dir.mkdir(parents=True, exist_ok=True)
+    has_content = False
+    for index in range(1, BITGET_MAX_FILE_INDEX + 1):
+        shard_tag = f"{index:03d}"
+        shard_name = f"{date_str.replace('-', '')}_{shard_tag}.zip"
+        output_path = build_bitget_output_path(base_dir, symbol, shard_name)
+        if output_path.exists():
+            has_content = True
             continue
-        if url in skip_urls:
-            continue
-        date_str = item.get("日期") or "未知日期"
-        file_name = Path(urlparse(url).path).name
-        status_update(symbol, done_count, f"重试 {date_str} {file_name}")
-        if download_by_url(url, date_str, symbol, fail_path, failures):
-            done_count += 1
-            status_update(symbol, done_count, f"重试 {date_str} {file_name}")
-    return done_count
+        url = f"{BITGET_SPOT_BASE_URL}/{symbol}/{shard_name}"
+        try:
+            content = download_bitget_bytes(url)
+        except RuntimeError as exc:
+            append_failure(fail_path, failure_key, "bitget", symbol, url, str(exc))
+            return False
+        if content is None:
+            if not has_content:
+                clear_failure(fail_path, failure_key)
+                return False
+            clear_failure(fail_path, failure_key)
+            log(f"bitget {symbol} {date_str} 已保留原始分片数: {index - 1}")
+            return True
+        tmp_path = output_path.with_name(output_path.name + ".part")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        tmp_path.write_bytes(content)
+        replace_output_file(tmp_path, output_path)
+        has_content = True
+        time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
+    if has_content:
+        log(f"bitget {symbol} {date_str} 达到分片上限 {BITGET_MAX_FILE_INDEX}，请检查是否仍有后续分片")
+        clear_failure(fail_path, failure_key)
+        return True
+    clear_failure(fail_path, failure_key)
+    return False
 
 
-def download_today(failures: list, skip_urls: set, symbol: str, fail_path: Path, done_count: int) -> int:
-    date_str = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    log(f"{symbol} 当前日期下载: {date_str}（UTC）")
-    url = build_url(BASE_URL, symbol, date_str)
-    file_name = Path(urlparse(url).path).name
-    status_update(symbol, done_count, f"今日 {date_str} {file_name}")
-    if url in skip_urls:
-        log(f"{symbol} 今日数据已在本轮尝试中，跳过重复请求")
-        return done_count
-    if has_failure(failures, url):
-        log(f"{symbol} 今日数据已在失败列表中，本轮跳过重复请求")
-        return done_count
-    dest_path = build_output_path(DATA_DIR, symbol, date_str)
-    if dest_path.exists():
-        if dest_path.stat().st_size == 0:
-            log(f"文件为空，将重新下载: {dest_path}")
-            dest_path.unlink()
-        else:
-            log(f"{symbol} 已存在，跳过今日下载: {dest_path}")
-            failures[:] = update_failures_file(fail_path, None, url)
-            return done_count
-    if download_by_url(url, date_str, symbol, fail_path, failures):
-        done_count += 1
-        status_update(symbol, done_count, f"今日 {date_str} {file_name}")
-    return done_count
-
-
-def run_symbol(symbol: str) -> None:
-    fail_path = build_fail_log_path()
-    failures = load_failures(fail_path)
-    latest_local = get_latest_local_date(symbol)
-    if latest_local:
-        start_date = next_date(latest_local)
-    else:
-        start_date = START_DATE
+def sync_binance_symbol(symbol: str, fail_path: Path) -> None:
+    """同步Binance现货成交。"""
+    base_dir = cex_config.get_source_dir(DATASET_ID, "binance")
+    start_date = cex_config.get_start_date(DATASET_ID, "binance", symbol)
+    if not base_dir or not start_date:
+        status_update("binance", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
+        return
+    latest_local = get_latest_local_date(base_dir, symbol) or start_date
+    start_dt = datetime.strptime(latest_local, "%Y-%m-%d")
+    end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    current = start_dt.replace(day=1)
     done_count = 0
-    skip_urls, done_count = run_initial_range(start_date, symbol, failures, fail_path, done_count)
-    while True:
-        failures = load_failures(fail_path)
-        done_count = retry_failures(failures, skip_urls, symbol, fail_path, done_count)
-        done_count = download_today(failures, skip_urls, symbol, fail_path, done_count)
-        skip_urls = set()
-        sleep_seconds = seconds_until_next_utc_4h()
-        log(f"{symbol} 等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
-        time.sleep(sleep_seconds)
+    while current <= end_dt:
+        month_tag = current.strftime("%Y-%m")
+        monthly_url = (
+            f"{BINANCE_BUCKET_URL}/data/spot/monthly/trades/{symbol}/{symbol}-trades-{month_tag}.zip"
+        )
+        month_failure_key = f"binance:{symbol}:month:{month_tag}"
+        success = download_binance_archive(base_dir, symbol, monthly_url, month_failure_key, fail_path)
+        if not success:
+            for date_str in iter_dates(current.strftime("%Y-%m-%d"), month_end(current.strftime("%Y-%m-%d"))):
+                if date_str > end_dt.strftime("%Y-%m-%d"):
+                    break
+                daily_url = (
+                    f"{BINANCE_BUCKET_URL}/data/spot/daily/trades/{symbol}/{symbol}-trades-{date_str}.zip"
+                )
+                if download_binance_archive(base_dir, symbol, daily_url, f"binance:{symbol}:day:{date_str}", fail_path):
+                    done_count += 1
+        else:
+            done_count += 1
+        status_update("binance", symbol, (done_count, month_tag))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+
+
+def fetch_okx_download_urls(symbol: str, start_day: str, end_day: str, date_aggr_type: str) -> list:
+    """获取OKX成交归档链接。"""
+    begin_ms, end_ms = build_okx_query_range(start_day, end_day)
+    params = {
+        "module": "1",
+        "instType": "SPOT",
+        "instIdList": symbol,
+        "dateAggrType": date_aggr_type,
+        "begin": str(begin_ms),
+        "end": str(end_ms),
+    }
+    data = request_okx_json(f"{OKX_MARKET_HISTORY_URL}?{urlencode(params)}")
+    if data.get("code") != "0":
+        raise RuntimeError(f"接口返回错误: {data.get('msg')}")
+    urls = []
+    for data_item in data.get("data", []):
+        for detail in data_item.get("details", []):
+            for item in detail.get("groupDetails", []):
+                url = item.get("url", "")
+                if url:
+                    urls.append(url)
+    return urls
+
+
+def sync_okx_symbol(symbol: str, fail_path: Path) -> None:
+    """同步OKX现货成交。"""
+    base_dir = cex_config.get_source_dir(DATASET_ID, "okx")
+    start_date = cex_config.get_start_date(DATASET_ID, "okx", symbol)
+    if not base_dir or not start_date:
+        status_update("okx", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
+        return
+    start_dt = datetime.strptime(get_latest_local_date(base_dir, symbol) or start_date, "%Y-%m-%d")
+    end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    current = start_dt.replace(day=1)
+    done_count = 0
+    while current <= end_dt:
+        month_finish = min(end_dt, datetime.strptime(month_end(current.strftime("%Y-%m-%d")), "%Y-%m-%d"))
+        month_start_day = current.strftime("%Y-%m-%d")
+        month_end_day = month_finish.strftime("%Y-%m-%d")
+        try:
+            urls = fetch_okx_download_urls(symbol, month_start_day, month_end_day, "monthly")
+        except NetworkRequestError as exc:
+            log(f"okx {symbol} 请求失败，结束本轮: {exc}")
+            return
+        time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
+        if urls:
+            for url in urls:
+                if download_okx_archive(base_dir, symbol, url, f"okx:{symbol}:month:{current.strftime('%Y-%m')}", fail_path):
+                    done_count += 1
+        else:
+            try:
+                urls = fetch_okx_download_urls(symbol, month_start_day, month_end_day, "daily")
+            except NetworkRequestError as exc:
+                log(f"okx {symbol} 请求失败，结束本轮: {exc}")
+                return
+            time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
+            for url in urls:
+                if download_okx_archive(base_dir, symbol, url, f"okx:{symbol}:day:{url}", fail_path):
+                    done_count += 1
+        status_update("okx", symbol, (done_count, current.strftime("%Y-%m")))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+
+
+def sync_bybit_symbol(symbol: str, fail_path: Path) -> None:
+    """同步Bybit现货成交。"""
+    base_dir = cex_config.get_source_dir(DATASET_ID, "bybit")
+    start_date = cex_config.get_start_date(DATASET_ID, "bybit", symbol)
+    if not base_dir or not start_date:
+        status_update("bybit", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
+        return
+    latest_local = get_latest_local_date(base_dir, symbol)
+    start_dt = datetime.strptime(latest_local or start_date, "%Y-%m-%d")
+    if latest_local:
+        start_dt += timedelta(days=1)
+    end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    done_count = 0
+    for date_str in iter_dates(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")):
+        if download_bybit_day(base_dir, symbol, date_str, fail_path):
+            done_count += 1
+        status_update("bybit", symbol, (done_count, date_str))
+
+
+def sync_bitget_symbol(symbol: str, fail_path: Path) -> None:
+    """同步Bitget现货成交。"""
+    base_dir = cex_config.get_source_dir(DATASET_ID, "bitget")
+    start_date = cex_config.get_start_date(DATASET_ID, "bitget", symbol)
+    if not base_dir or not start_date:
+        status_update("bitget", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
+        return
+    latest_local = get_latest_bitget_local_date(base_dir, symbol)
+    start_dt = datetime.strptime(latest_local or start_date, "%Y-%m-%d")
+    if latest_local:
+        start_dt += timedelta(days=1)
+    end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    done_count = 0
+    for date_str in iter_dates(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")):
+        if download_bitget_day(base_dir, symbol, date_str, fail_path):
+            done_count += 1
+        status_update("bitget", symbol, (done_count, date_str))
+
+
+def run_exchange(exchange: str, symbols: list, worker) -> None:
+    """执行单个交易所同步。"""
+    if not cex_config.is_supported(DATASET_ID, exchange):
+        for symbol in symbols:
+            status_update(exchange, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
+        return
+    fail_path = build_fail_log_path()
+    for symbol in symbols:
+        worker(symbol, fail_path)
 
 
 def main() -> None:
-    if not SYMBOLS:
-        log("未配置交易对")
-        return
-    threads = []
-    for symbol in SYMBOLS:
-        thread = threading.Thread(target=run_symbol, args=(symbol,))
-        thread.start()
-        threads.append(thread)
-    for thread in threads:
-        thread.join()
+    """运行现货成交下载主循环。"""
+    while True:
+        threads = [
+            threading.Thread(
+                target=run_exchange,
+                args=("bybit", cex_config.get_spot_trade_symbols("bybit"), sync_bybit_symbol),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=run_exchange,
+                args=("binance", cex_config.get_spot_trade_symbols("binance"), sync_binance_symbol),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=run_exchange,
+                args=("bitget", cex_config.get_spot_trade_symbols("bitget"), sync_bitget_symbol),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=run_exchange,
+                args=("okx", cex_config.get_spot_trade_symbols("okx"), sync_okx_symbol),
+                daemon=True,
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        sleep_seconds = seconds_until_next_utc_4h()
+        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
+        time.sleep(sleep_seconds)
 
 
 def run() -> None:
+    """兼容启动器运行入口。"""
     main()
 
 

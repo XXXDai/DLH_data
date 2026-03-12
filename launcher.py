@@ -10,6 +10,7 @@ import threading
 import time
 import unicodedata
 import app_config
+from cex import cex_config
 import D10001.d10001download as d10001download
 import D10005.d10005download as d10005download
 import D10011.d10011 as d10011
@@ -21,8 +22,6 @@ import D10016.d10016 as d10016
 import D10017.d10017download as d10017download
 import D10018.d10018download as d10018download
 import D10019.d10019download as d10019download
-import D10020.d10020 as d10020
-import D10021.d10021 as d10021
 
 
 TASK_DEFS = [
@@ -37,11 +36,8 @@ TASK_DEFS = [
     ("D10017", "D10017 下载", d10017download, None),
     ("D10018", "D10018 下载", d10018download, None),
     ("D10019", "D10019 下载", d10019download, None),
-    ("D10020", "D10020 处理", d10020, None),
-    ("D10021", "D10021 处理", d10021, None),
     ("D10002-4", "D10002-4 WS", None, "D10002-4/d10002-4ws.py"),
     ("D10006-8", "D10006-8 WS", None, "D10006-8/d10006-8ws.py"),
-    ("D10022-23", "D10022-23 WS", None, "D10022-23/d10022-23ws.py"),
 ]  # 任务定义列表，个数
 
 
@@ -62,11 +58,8 @@ TASK_FREQUENCY = {
     "D10017": "每日",
     "D10018": "每日",
     "D10019": "每日",
-    "D10020": "每小时",
-    "D10021": "每小时",
     "D10002-4": "实时",
     "D10006-8": "实时",
-    "D10022-23": "实时",
 }  # 任务更新频率映射，映射
 
 
@@ -254,6 +247,7 @@ def pad_to_cells(text: str, target_cells: int) -> str:
 
 
 def parse_download_status(text: str) -> tuple[str, str, str]:
+    """解析下载状态文本。"""
     text = (text or "").strip()
     if not text:
         return "-", "-", "-"
@@ -267,6 +261,94 @@ def parse_download_status(text: str) -> tuple[str, str, str]:
     if text == "已对齐":
         return "对齐", "-", "-"
     return "-", "-", truncate_by_cells(text, 60)
+
+
+def group_tasks_by_exchange(tasks: list) -> tuple[list[str], dict]:
+    """按交易所归类任务列表。"""
+    grouped = {}
+    for exchange in cex_config.list_exchanges():
+        grouped[exchange] = [task for task in tasks if cex_config.is_supported(task.task_id, exchange)]
+    exchanges = [exchange for exchange in cex_config.list_exchanges() if grouped.get(exchange)]
+    return exchanges, grouped
+
+
+def split_status_bucket_by_exchange(bucket: dict, exchange: str) -> tuple[dict, dict]:
+    """拆分交易所状态与共享状态。"""
+    exchange_bucket = {}
+    shared_bucket = {}
+    prefix = f"{exchange}/"
+    for key, value in bucket.items():
+        if isinstance(key, str) and key.startswith(prefix):
+            exchange_bucket[key] = value
+        elif isinstance(key, str) and "/" not in key:
+            shared_bucket[key] = value
+    return exchange_bucket, shared_bucket
+
+
+def get_status_bucket_for_exchange(task_id: str, exchange: str, status_counts: dict) -> dict:
+    """返回当前交易所应显示的状态桶。"""
+    bucket = status_counts.get(task_id, {})
+    exchange_bucket, shared_bucket = split_status_bucket_by_exchange(bucket, exchange)
+    return exchange_bucket if exchange_bucket else shared_bucket
+
+
+def get_total_count(bucket: dict) -> int:
+    """汇总状态桶中的计数。"""
+    total_count = 0
+    for value in bucket.values():
+        if isinstance(value, (int, float)):
+            total_count += value
+            continue
+        if isinstance(value, tuple) and value and isinstance(value[0], (int, float)):
+            total_count += value[0]
+    return total_count
+
+
+def get_last_update_text(task_id: str, exchange: str, bucket: dict, status_times: dict, status_meta: dict) -> str:
+    """返回交易所视图的最近更新时间文本。"""
+    if bucket:
+        meta_bucket = status_meta.get(task_id, {})
+        last_ts = 0.0
+        for key in bucket:
+            item_ts = meta_bucket.get(key) or 0.0
+            if item_ts > last_ts:
+                last_ts = item_ts
+        if last_ts:
+            return time.strftime("%H:%M:%S", time.localtime(last_ts))
+    last_ts = status_times.get(task_id)
+    return time.strftime("%H:%M:%S", time.localtime(last_ts)) if last_ts else "-"
+
+
+def simplify_status_key(exchange: str, key: str) -> str:
+    """简化状态键显示文本。"""
+    prefix = f"{exchange}/"
+    if isinstance(key, str) and key.startswith(prefix):
+        return key[len(prefix) :]
+    return str(key)
+
+
+def filter_logs_for_exchange(log_lines: list, exchange: str) -> list:
+    """按交易所筛选日志列表。"""
+    exchange_names = cex_config.list_exchanges()
+    filtered = []
+    for line in log_lines:
+        lower_line = line.lower()
+        if exchange in lower_line:
+            filtered.append(line)
+            continue
+        if not any(name in lower_line for name in exchange_names):
+            filtered.append(line)
+    return filtered or log_lines
+
+
+def filter_logs_for_status(log_lines: list, exchange: str, status_key: str) -> list:
+    """按状态项筛选日志列表。"""
+    symbol_text = str(status_key).split("/")[-1]
+    strict = [line for line in log_lines if exchange in line.lower() and symbol_text in line]
+    if strict:
+        return strict
+    fuzzy = [line for line in log_lines if symbol_text in line]
+    return fuzzy or log_lines
 
 
 def build_tasks():
@@ -403,6 +485,7 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
 
 
 def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pending) -> None:
+    """运行按交易所分组的终端界面。"""
     stdscr.nodelay(True)
     stdscr.keypad(True)
     color_enabled = curses.has_colors()
@@ -411,11 +494,14 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         curses.use_default_colors()
         curses.init_pair(1, curses.COLOR_GREEN, -1)
         curses.init_pair(2, curses.COLOR_RED, -1)
-    selected = 0
+    exchanges, grouped_tasks = group_tasks_by_exchange(tasks)
+    if not exchanges:
+        return
+    selected_exchange = 0
+    task_selected = {exchange: 0 for exchange in exchanges}
+    status_selected_map = {}
+    status_scroll_map = {}
     focus = "tasks"
-    status_selected_index = 0
-    status_scroll = 0
-    prev_task_id = None
     status_height_cached = 0
     schedule_cache = {}
     last_schedule_ts = 0.0
@@ -426,82 +512,79 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             time.sleep(app_config.TUI_REFRESH_SECONDS)
             continue
         list_width = max(30, max_cols // 3)
-        stdscr.addstr(0, 0, truncate_by_cells("启动管理（q退出）", max(0, list_width - 1)))
+        current_exchange = exchanges[selected_exchange]
+        exchange_tasks = grouped_tasks.get(current_exchange, [])
+        if exchange_tasks:
+            task_selected[current_exchange] = max(0, min(task_selected[current_exchange], len(exchange_tasks) - 1))
+            current = exchange_tasks[task_selected[current_exchange]]
+        else:
+            current = None
+        stdscr.addstr(0, 0, truncate_by_cells("启动管理（←→切交易所，↑↓切任务，Tab切状态，q退出）", max_cols - 1))
+        tab_items = []
+        for idx, exchange in enumerate(exchanges):
+            label = exchange.upper()
+            if idx == selected_exchange:
+                tab_items.append(f"[{label}]")
+            else:
+                tab_items.append(f" {label} ")
+        if max_rows > 1:
+            stdscr.addstr(1, 0, truncate_by_cells(" ".join(tab_items), max(0, list_width - 1)))
         now_ts = time.time()
         if now_ts - last_schedule_ts >= SCHEDULE_REFRESH_SECONDS:
             last_schedule_ts = now_ts
             schedule_cache.clear()
             for task in tasks:
                 schedule_cache[task.task_id] = compute_next_trigger(task.task_id)
-        if max_rows > 1:
+        if max_rows > 2:
             stdscr.addstr(
-                1,
+                2,
                 0,
                 truncate_by_cells("任务 | 状态 | 计数 | 更新时间", max(0, list_width - 1)),
             )
-        row = 2
-        for idx, task in enumerate(tasks):
+        row = 3
+        for idx, task in enumerate(exchange_tasks):
             if row >= max_rows:
                 break
             status = "运行中" if task.is_running() else "已退出"
-            counts = status_counts.get(task.task_id, {})
-            total_count = 0
-            for value in counts.values():
-                if isinstance(value, (int, float)):
-                    total_count += value
-                    continue
-                if isinstance(value, tuple) and value and isinstance(value[0], (int, float)):
-                    total_count += value[0]
-            last_ts = status_times.get(task.task_id)
-            last_text = time.strftime("%H:%M:%S", time.localtime(last_ts)) if last_ts else "-"
-            prefix = ">" if idx == selected else " "
+            counts = get_status_bucket_for_exchange(task.task_id, current_exchange, status_counts)
+            total_count = get_total_count(counts)
+            last_text = get_last_update_text(task.task_id, current_exchange, counts, status_times, status_meta)
+            prefix = ">" if idx == task_selected[current_exchange] else " "
             line = f"{prefix} {task.name} | {status} | {total_count} | {last_text}"
             if list_width > 1:
                 stdscr.addstr(row, 0, truncate_by_cells(line, list_width - 1))
             row += 1
-        list_height = max(0, row - 2)
-        if tasks:
-            selected = max(0, min(selected, len(tasks) - 1))
-            current = tasks[selected]
-            if current.task_id != prev_task_id:
-                status_selected_index = 0
-                status_scroll = 0
-                prev_task_id = current.task_id
+        list_height = max(0, row - 3)
+        if current:
             log_lines = list(logs.get(current.task_id, []))
             pending_line = pending.get(current.task_id, "")
             if pending_line:
                 log_lines = log_lines + [pending_line]
-            log_start = 2
+            log_lines = filter_logs_for_exchange(log_lines, current_exchange)
+            log_start = 3
             log_col = list_width + 1
-            if max_rows > 1 and log_col < max_cols - 1:
+            if max_rows > 2 and log_col < max_cols - 1:
+                stdscr.addstr(1, log_col, truncate_by_cells(f"{current_exchange.upper()} / {current.name}", max_cols - log_col - 1))
                 if current.is_running():
                     next_text, countdown_text = schedule_cache.get(current.task_id, ("-", "-"))
                 else:
                     next_text, countdown_text = "-", "-"
                 schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text}"
-                stdscr.addstr(0, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
-                stdscr.addstr(1, log_col, truncate_by_cells(f"日志: {current.name}", max_cols - log_col - 1))
+                stdscr.addstr(2, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
             status_items = []
             ws_tasks = {"D10002-4", "D10006-8", "D10022-23"}
-            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10020", "D10021", "D10002-4", "D10006-8", "D10022-23"}:
-                counts = status_counts.get(current.task_id, {})
-                numeric_total = 0
-                for value in counts.values():
-                    if isinstance(value, (int, float)):
-                        numeric_total += value
-                        continue
-                    if isinstance(value, tuple) and value and isinstance(value[0], (int, float)):
-                        numeric_total += value[0]
+            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10017", "D10018", "D10019", "D10002-4", "D10006-8"}:
+                counts = get_status_bucket_for_exchange(current.task_id, current_exchange, status_counts)
+                numeric_total = get_total_count(counts)
                 if current.task_id in {"D10002-4", "D10006-8"}:
                     title = f"订阅计数（总计: {numeric_total}）"
-                elif current.task_id == "D10022-23":
-                    title = "市场状态"
-                elif current.task_id in {"D10020", "D10021"}:
-                    title = "聚合状态"
+                elif current.task_id in {"D10017", "D10018", "D10019"}:
+                    title = "同步状态"
                 else:
                     title = "下载状态"
                 for key in sorted(counts):
                     value = counts[key]
+                    display_key = simplify_status_key(current_exchange, key)
                     if (
                         current.task_id in {"D10001", "D10005", "D10013", "D10014"}
                         and isinstance(value, tuple)
@@ -509,24 +592,27 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                         and isinstance(value[0], (int, float))
                     ):
                         progress, date_text, file_name = parse_download_status(str(value[1]))
-                        status_items.append((key, (int(value[0]), progress, date_text, file_name), None))
+                        status_items.append((key, display_key, (int(value[0]), progress, date_text, file_name), None))
                         continue
                     if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
-                        line_text = f"{key}: {value[0]} {value[1]}"
+                        line_text = f"{display_key}: {value[0]} {value[1]}"
                     else:
-                        line_text = f"{key}: {value}"
+                        line_text = f"{display_key}: {value}"
                     if current.task_id in ws_tasks:
                         last_ts = status_meta.get(current.task_id, {}).get(key)
                         alive = bool(last_ts and (time.time() - last_ts) <= WS_STATUS_STALE_SECONDS)
-                        status_items.append((key, line_text, alive))
+                        status_items.append((key, display_key, line_text, alive))
                     else:
-                        status_items.append((key, line_text, None))
+                        status_items.append((key, display_key, line_text, None))
             if status_items:
+                view_key = (current_exchange, current.task_id)
+                status_selected_index = status_selected_map.get(view_key, 0)
+                status_scroll = status_scroll_map.get(view_key, 0)
                 available = max_cols - log_col - 1
                 total = len(status_items)
                 status_header = None
                 if current.task_id in {"D10001", "D10005", "D10013", "D10014"}:
-                    status_header = ("交易对", "完成", "进度", "日期", "文件名")
+                    status_header = ("对象", "完成", "进度", "日期", "文件名")
                 header_rows = 1 if status_header else 0
                 status_height = min(total, max(0, list_height - header_rows))
                 status_height_cached = status_height
@@ -547,12 +633,12 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     max_symbol_cells = 0
                     max_done_cells = 0
                     max_progress_cells = 0
-                    items_for_width = [item for item in status_items if isinstance(item[1], tuple)]
-                    for _key, record, _alive in items_for_width:
+                    items_for_width = [item for item in status_items if isinstance(item[2], tuple)]
+                    for _raw_key, display_key, record, _alive in items_for_width:
                         if not isinstance(record, tuple) or len(record) != 4:
                             continue
                         done_count, progress, _date_text, _file_name = record
-                        max_symbol_cells = max(max_symbol_cells, sum(cell_width(ch) for ch in str(_key)))
+                        max_symbol_cells = max(max_symbol_cells, sum(cell_width(ch) for ch in str(display_key)))
                         max_done_cells = max(max_done_cells, sum(cell_width(ch) for ch in str(done_count)))
                         max_progress_cells = max(max_progress_cells, sum(cell_width(ch) for ch in str(progress)))
                     symbol_cells = min(max(6, max_symbol_cells), 20)
@@ -583,13 +669,13 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                         break
                     if available <= 0:
                         break
-                    key, line_text, alive = status_items[item_index]
+                    key, display_key, line_text, alive = status_items[item_index]
                     if isinstance(line_text, tuple) and len(line_text) == 4:
                         done_count, progress, date_text, file_name = line_text
                         prefix = "> " if item_index == status_selected_index else "  "
                         row_text = (
                             prefix
-                            + pad_to_cells(key, symbol_cells)
+                            + pad_to_cells(display_key, symbol_cells)
                             + " "
                             + pad_to_cells(str(done_count), done_cells)
                             + " "
@@ -622,9 +708,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     else:
                         stdscr.addstr(target_row, log_col, truncate_by_cells(line_text, available))
                 log_start = log_start + status_height + 1 + header_rows
+                status_selected_map[view_key] = status_selected_index
+                status_scroll_map[view_key] = status_scroll
                 if focus == "status":
                     selected_key = status_items[status_selected_index][0]
-                    log_lines = [line for line in log_lines if selected_key in line]
+                    log_lines = filter_logs_for_status(log_lines, current_exchange, selected_key)
             visible_lines = max_rows - log_start - 1
             tail_lines = log_lines[-visible_lines:] if visible_lines > 0 else []
             for idx, line in enumerate(tail_lines):
@@ -641,17 +729,21 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         if key == ord("q"):
             break
         if key == curses.KEY_LEFT:
-            focus = "tasks"
+            selected_exchange = (selected_exchange - 1) % len(exchanges)
         if key == curses.KEY_RIGHT:
-            focus = "status"
+            selected_exchange = (selected_exchange + 1) % len(exchanges)
         if key == ord("\t"):
             focus = "status" if focus == "tasks" else "tasks"
         if focus == "tasks":
             if key == curses.KEY_UP:
-                selected -= 1
+                task_selected[current_exchange] -= 1
             if key == curses.KEY_DOWN:
-                selected += 1
+                task_selected[current_exchange] += 1
+            if exchange_tasks:
+                task_selected[current_exchange] = max(0, min(task_selected[current_exchange], len(exchange_tasks) - 1))
         else:
+            current_view_key = (current_exchange, current.task_id) if current else None
+            status_selected_index = status_selected_map.get(current_view_key, 0) if current_view_key else 0
             if key == curses.KEY_UP:
                 status_selected_index -= 1
             if key == curses.KEY_DOWN:
@@ -660,6 +752,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 status_selected_index += max(1, status_height_cached)
             if key == curses.KEY_PPAGE:
                 status_selected_index -= max(1, status_height_cached)
+            if current_view_key:
+                status_selected_map[current_view_key] = max(0, status_selected_index)
         time.sleep(app_config.TUI_REFRESH_SECONDS)
 
 

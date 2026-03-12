@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
 
-DATA_DIR = Path("data/src/bybit_spot_orderbook_rt_ss_1s")  # 数据目录，路径
+DATA_DIR = Path("data/dylan/src/bybit_spot_orderbook_rt_ss_1s")  # 数据目录，路径
 SYMBOL = "BTCUSDT"  # 交易对，字符串
 HOUR = "2026012015"  # 小时分区，小时
 START_HOUR = "2026-01-20 15:00"  # 开始时间，时间

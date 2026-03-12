@@ -3,7 +3,7 @@ from pathlib import Path
 import csv
 import gzip
 
-DATA_DIR = Path("data/src/bybit_spot_trade_di")  # 数据目录，路径
+DATA_DIR = Path("data/dylan/src/bybit_spot_trade_di")  # 数据目录，路径
 SYMBOL = "BTCUSDT"  # 交易对，字符串
 DATE = "2026-02-10"  # 数据日期，日期
 

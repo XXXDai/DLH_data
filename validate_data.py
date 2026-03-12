@@ -4,13 +4,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import sys
+import tarfile
 import zipfile
 
-import app_config
+from cex import cex_config
 
 
-DATA_ROOT = Path("data/src")  # 数据根目录，路径
+DATA_ROOT = Path("data/dylan/src")  # 数据根目录，路径
 DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\d{2}[A-Z]{3}\d{2}$")  # 交割合约格式，正则
+OKX_DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\d{6}$")  # OKX交割合约格式，正则
+BITGET_ARCHIVE_NAME_PATTERN = re.compile(r"^(\d{8})_\d{3}\.zip$")  # Bitget归档文件名格式，正则
 
 
 @dataclass
@@ -45,7 +48,17 @@ def is_valid_ymd(date_text: str) -> bool:
 
 
 def is_delivery_symbol(symbol: str) -> bool:
-    return bool(DELIVERY_SYMBOL_PATTERN.match(symbol))
+    """判断是否为交割合约目录名。"""
+    return bool(DELIVERY_SYMBOL_PATTERN.match(symbol) or OKX_DELIVERY_SYMBOL_PATTERN.match(symbol))
+
+
+def delivery_base_symbol(symbol: str) -> str:
+    """提取交割合约对应的基础标识。"""
+    if DELIVERY_SYMBOL_PATTERN.match(symbol):
+        return symbol.split("-", 1)[0]
+    if OKX_DELIVERY_SYMBOL_PATTERN.match(symbol):
+        return "-".join(symbol.split("-")[:2])
+    return symbol
 
 
 def validate_orderbook_di(
@@ -55,13 +68,15 @@ def validate_orderbook_di(
     base_symbols: list[str],
     allow_delivery: bool,
     start_date: str,
+    exchange: str,
 ) -> None:
+    """校验历史订单簿归档目录。"""
     if not data_dir.exists():
         report.warn(f"{dataset_id} 数据目录不存在: {data_dir}")
         return
 
     base_set = set(base_symbols)
-    excludes = set(app_config.BYBIT_FUTURE_DELIVERY_EXCLUDE)  # 交割合约过滤列表，个数
+    excludes = set(cex_config.BYBIT_FUTURE_DELIVERY_EXCLUDE)  # 交割合约过滤列表，个数
     allowed_delivery_bases = base_set - excludes
     observed_symbols: set[str] = set()
     per_symbol_dates: dict[str, set[str]] = {}
@@ -71,7 +86,7 @@ def validate_orderbook_di(
         symbol = symbol_dir.name
         observed_symbols.add(symbol)
         if allow_delivery and is_delivery_symbol(symbol):
-            base = symbol.split("-", 1)[0]
+            base = delivery_base_symbol(symbol)
             if base in excludes:
                 report.error(f"{dataset_id} 发现被过滤交割合约: {symbol}")
             if base not in allowed_delivery_bases:
@@ -86,14 +101,48 @@ def validate_orderbook_di(
             if name.endswith(".part"):
                 report.warn(f"{dataset_id} 发现临时文件，可能是未完成下载: {file_path}")
                 continue
-            suffix = f"_{symbol}_ob200.data.zip"
-            if not name.endswith("_ob200.data.zip"):
-                report.error(f"{dataset_id} 文件后缀不符合: {file_path}")
-                continue
-            if not name.endswith(suffix):
-                report.error(f"{dataset_id} 文件名交易对不匹配: {file_path}")
-                continue
-            date_text = name[: -len(suffix)]
+            if exchange == "bybit":
+                suffix = f"_{symbol}_ob200.data.zip"
+                if not name.endswith("_ob200.data.zip"):
+                    report.error(f"{dataset_id} 文件后缀不符合: {file_path}")
+                    continue
+                if not name.endswith(suffix):
+                    report.error(f"{dataset_id} 文件名交易对不匹配: {file_path}")
+                    continue
+                date_text = name[: -len(suffix)]
+            elif exchange == "binance":
+                prefix = f"{symbol}-bookTicker-"
+                suffix = ".zip"
+                if not name.endswith(suffix):
+                    report.error(f"{dataset_id} 文件后缀不符合: {file_path}")
+                    continue
+                if not name.startswith(prefix):
+                    report.error(f"{dataset_id} 文件名交易对不匹配: {file_path}")
+                    continue
+                date_text = name[len(prefix) : -len(suffix)]
+            elif exchange == "bitget":
+                if not name.endswith(".zip"):
+                    report.error(f"{dataset_id} 文件后缀不符合: {file_path}")
+                    continue
+                raw_date = name.removesuffix(".zip")
+                if len(raw_date) != 8 or not raw_date.isdigit():
+                    report.error(f"{dataset_id} 文件名日期不合法: {file_path}")
+                    continue
+                date_text = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+            elif exchange == "okx":
+                level = "400lv"
+                prefix = f"{symbol}-L2orderbook-{level}-"
+                suffix = ".tar.gz"
+                if not name.endswith(suffix):
+                    report.error(f"{dataset_id} 文件后缀不符合: {file_path}")
+                    continue
+                if not name.startswith(prefix):
+                    report.error(f"{dataset_id} 文件名交易对不匹配: {file_path}")
+                    continue
+                date_text = name[len(prefix) : -len(suffix)]
+            else:
+                report.error(f"{dataset_id} 校验脚本配置错误: exchange={exchange}")
+                return
             if not is_valid_ymd(date_text):
                 report.error(f"{dataset_id} 文件名日期不合法: {file_path}")
                 continue
@@ -102,8 +151,14 @@ def validate_orderbook_di(
             dates.add(date_text)
             if file_path.stat().st_size == 0:
                 report.error(f"{dataset_id} 发现空文件: {file_path}")
-            if not zipfile.is_zipfile(file_path):
+            if exchange == "bybit" and not zipfile.is_zipfile(file_path):
                 report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
+            if exchange == "binance" and not zipfile.is_zipfile(file_path):
+                report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
+            if exchange == "bitget" and not zipfile.is_zipfile(file_path):
+                report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
+            if exchange == "okx" and not tarfile.is_tarfile(file_path):
+                report.error(f"{dataset_id} 不是有效tar.gz文件: {file_path}")
             if has_start_date and date_text < start_date:
                 report.warn(f"{dataset_id} 发现早于配置起始日期({start_date})的数据: {file_path}")
 
@@ -130,7 +185,7 @@ def validate_trade_di(
         return
 
     base_set = set(base_symbols)
-    excludes = set(app_config.BYBIT_FUTURE_DELIVERY_EXCLUDE)  # 交割合约过滤列表，个数
+    excludes = set(cex_config.BYBIT_FUTURE_DELIVERY_EXCLUDE)  # 交割合约过滤列表，个数
     allowed_delivery_bases = base_set - excludes
     observed_symbols: set[str] = set()
     has_start_date = is_valid_ymd(start_date)
@@ -139,7 +194,7 @@ def validate_trade_di(
         symbol = symbol_dir.name
         observed_symbols.add(symbol)
         if allow_delivery and is_delivery_symbol(symbol):
-            base = symbol.split("-", 1)[0]
+            base = delivery_base_symbol(symbol)
             if base in excludes:
                 report.error(f"{dataset_id} 发现被过滤交割合约: {symbol}")
             if base not in allowed_delivery_bases:
@@ -189,6 +244,75 @@ def validate_trade_di(
             report.warn(f"{dataset_id} 缺少交易对目录: {sym}")
 
 
+def parse_bitget_archive_date(name: str) -> str | None:
+    """解析Bitget原始归档日期。"""
+    matched = BITGET_ARCHIVE_NAME_PATTERN.match(name)
+    if not matched:
+        return None
+    raw_date = matched.group(1)
+    return f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+
+
+def validate_bitget_trade_raw_di(
+    report: Report,
+    dataset_id: str,
+    data_dir: Path,
+    base_symbols: list[str],
+    allow_delivery: bool,
+    start_date: str,
+) -> None:
+    """校验Bitget原始成交归档目录。"""
+    if not data_dir.exists():
+        report.warn(f"{dataset_id} 数据目录不存在: {data_dir}")
+        return
+
+    base_set = set(base_symbols)
+    excludes = set(cex_config.BYBIT_FUTURE_DELIVERY_EXCLUDE)  # 交割合约过滤列表，个数
+    allowed_delivery_bases = base_set - excludes
+    observed_symbols: set[str] = set()
+    has_start_date = is_valid_ymd(start_date)
+
+    for symbol_dir in sorted([p for p in data_dir.iterdir() if p.is_dir()]):
+        symbol = symbol_dir.name
+        observed_symbols.add(symbol)
+        if allow_delivery and is_delivery_symbol(symbol):
+            base = delivery_base_symbol(symbol)
+            if base in excludes:
+                report.error(f"{dataset_id} 发现被过滤交割合约: {symbol}")
+            if base not in allowed_delivery_bases:
+                report.error(f"{dataset_id} 发现未配置的交割合约基础交易对: {symbol}")
+        else:
+            if symbol not in base_set:
+                report.error(f"{dataset_id} 发现未配置的交易对目录: {symbol}")
+
+        for file_path in sorted([p for p in symbol_dir.iterdir() if p.is_file()]):
+            name = file_path.name
+            if name.endswith(".part"):
+                report.warn(f"{dataset_id} 发现临时文件，可能是未完成下载: {file_path}")
+                continue
+            date_text = parse_bitget_archive_date(name)
+            if not date_text:
+                report.error(f"{dataset_id} 文件名不符合Bitget原始归档格式: {file_path}")
+                continue
+            if not is_valid_ymd(date_text):
+                report.error(f"{dataset_id} 文件名日期不合法: {file_path}")
+                continue
+            if file_path.stat().st_size == 0:
+                report.error(f"{dataset_id} 发现空文件: {file_path}")
+            if not zipfile.is_zipfile(file_path):
+                report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
+            if has_start_date and date_text < start_date:
+                report.warn(f"{dataset_id} 发现早于配置起始日期({start_date})的数据: {file_path}")
+
+    if not observed_symbols:
+        report.warn(f"{dataset_id} 数据目录为空: {data_dir}")
+        return
+
+    for sym in base_symbols:
+        if sym not in observed_symbols:
+            report.warn(f"{dataset_id} 缺少交易对目录: {sym}")
+
+
 def validate_single_csv_per_symbol(
     report: Report,
     dataset_id: str,
@@ -218,69 +342,167 @@ def validate_single_csv_per_symbol(
             report.warn(f"{dataset_id} 缺少目录: {sym}")
 
 
+def validate_enabled_orderbook_di(
+    report: Report,
+    dataset_id: str,
+    data_dir: Path,
+    base_symbols: list[str],
+    has_delivery: bool,
+    start_date: str,
+    exchange: str,
+) -> None:
+    """仅校验已启用交易所的订单簿目录。"""
+    base_dataset_id = dataset_id.split("/", 1)[0]
+    if not cex_config.is_supported(base_dataset_id, exchange):
+        return
+    validate_orderbook_di(report, dataset_id, data_dir, base_symbols, has_delivery, start_date, exchange)
+
+
 def main() -> int:
+    """执行全量数据校验。"""
     report = Report()
-
-    base_symbols = app_config.parse_bybit_symbols(app_config.BYBIT_SYMBOL)
-    if not base_symbols:
-        print("未配置 BYBIT_SYMBOL，无法校验。")
-        return 2
-
-    validate_orderbook_di(
+    validate_enabled_orderbook_di(
         report,
-        "D10001",
-        DATA_ROOT / "bybit_future_orderbook_di",
-        base_symbols,
+        "D10001/bybit",
+        cex_config.get_source_dir("D10001", "bybit") or DATA_ROOT / "bybit_future_orderbook_di",
+        cex_config.get_future_symbols("bybit"),
         True,
-        app_config.D10001_START_DATE,
+        cex_config.get_min_start_date("D10001", "bybit"),
+        "bybit",
     )
-    validate_orderbook_di(
+    validate_enabled_orderbook_di(
         report,
-        "D10005",
-        DATA_ROOT / "bybit_spot_orderbook_di",
-        base_symbols,
+        "D10001/okx",
+        cex_config.get_source_dir("D10001", "okx") or DATA_ROOT / "okx_future_orderbook_di",
+        cex_config.get_future_symbols("okx"),
         False,
-        app_config.D10005_START_DATE,
+        cex_config.get_min_start_date("D10001", "okx"),
+        "okx",
     )
-    validate_trade_di(
+    validate_enabled_orderbook_di(
         report,
-        "D10013",
-        DATA_ROOT / "bybit_future_trade_di",
-        base_symbols,
-        True,
-        app_config.D10013_START_DATE,
-        "concat",
-    )
-    validate_trade_di(
-        report,
-        "D10014",
-        DATA_ROOT / "bybit_spot_trade_di",
-        base_symbols,
+        "D10001/binance",
+        cex_config.get_source_dir("D10001", "binance") or DATA_ROOT / "binance_future_orderbook_di",
+        cex_config.get_future_symbols("binance"),
         False,
-        app_config.D10014_START_DATE,
-        "underscore",
+        cex_config.get_min_start_date("D10001", "binance"),
+        "binance",
     )
-    validate_single_csv_per_symbol(
+    validate_enabled_orderbook_di(
         report,
-        "D10017",
-        DATA_ROOT / "bybit_future_fundingrate_di",
-        base_symbols,
-        "_fundingrate.csv",
+        "D10001/bitget",
+        cex_config.get_source_dir("D10001", "bitget") or DATA_ROOT / "bitget_future_orderbook_di",
+        cex_config.get_future_symbols("bitget"),
+        False,
+        cex_config.get_min_start_date("D10001", "bitget"),
+        "bitget",
     )
-    validate_single_csv_per_symbol(
+    validate_enabled_orderbook_di(
         report,
-        "D10018",
-        DATA_ROOT / "bybit_insurance_di",
-        app_config.BYBIT_INSURANCE_COINS,
-        "_insurance.csv",
+        "D10005/bybit",
+        cex_config.get_source_dir("D10005", "bybit") or DATA_ROOT / "bybit_spot_orderbook_di",
+        cex_config.get_spot_symbols("bybit"),
+        False,
+        cex_config.get_min_start_date("D10005", "bybit"),
+        "bybit",
     )
-    validate_single_csv_per_symbol(
+    validate_enabled_orderbook_di(
         report,
-        "D10019",
-        DATA_ROOT / "bybit_onchainstaking_di",
-        app_config.BYBIT_ONCHAIN_COINS,
-        "_onchainstaking.csv",
+        "D10005/okx",
+        cex_config.get_source_dir("D10005", "okx") or DATA_ROOT / "okx_spot_orderbook_di",
+        cex_config.get_spot_symbols("okx"),
+        False,
+        cex_config.get_min_start_date("D10005", "okx"),
+        "okx",
     )
+    validate_enabled_orderbook_di(
+        report,
+        "D10005/bitget",
+        cex_config.get_source_dir("D10005", "bitget") or DATA_ROOT / "bitget_spot_orderbook_di",
+        cex_config.get_spot_symbols("bitget"),
+        False,
+        cex_config.get_min_start_date("D10005", "bitget"),
+        "bitget",
+    )
+    for exchange in cex_config.list_exchanges():
+        data_dir = cex_config.get_source_dir("D10013", exchange)
+        if not data_dir:
+            continue
+        if exchange == "bitget":
+            validate_bitget_trade_raw_di(
+                report,
+                f"D10013/{exchange}",
+                data_dir,
+                sorted(set(cex_config.get_future_trade_symbols(exchange)) | set(cex_config.get_delivery_families(exchange))),
+                exchange in {"bybit", "okx"},
+                cex_config.get_min_start_date("D10013", exchange),
+            )
+        else:
+            validate_trade_di(
+                report,
+                f"D10013/{exchange}",
+                data_dir,
+                sorted(set(cex_config.get_future_trade_symbols(exchange)) | set(cex_config.get_delivery_families(exchange))),
+                exchange in {"bybit", "okx"},
+                cex_config.get_min_start_date("D10013", exchange),
+                "concat",
+            )
+    for exchange in cex_config.list_exchanges():
+        data_dir = cex_config.get_source_dir("D10014", exchange)
+        if not data_dir:
+            continue
+        if exchange == "bitget":
+            validate_bitget_trade_raw_di(
+                report,
+                f"D10014/{exchange}",
+                data_dir,
+                cex_config.get_spot_trade_symbols(exchange),
+                False,
+                cex_config.get_min_start_date("D10014", exchange),
+            )
+        else:
+            validate_trade_di(
+                report,
+                f"D10014/{exchange}",
+                data_dir,
+                cex_config.get_spot_trade_symbols(exchange),
+                False,
+                cex_config.get_min_start_date("D10014", exchange),
+                "underscore",
+            )
+    for exchange in cex_config.get_supported_exchanges("D10017"):
+        data_dir = cex_config.get_source_dir("D10017", exchange)
+        if not data_dir:
+            continue
+        validate_single_csv_per_symbol(
+            report,
+            f"D10017/{exchange}",
+            data_dir,
+            cex_config.get_funding_symbols(exchange),
+            "_fundingrate.csv",
+        )
+    for exchange in cex_config.get_supported_exchanges("D10018"):
+        data_dir = cex_config.get_source_dir("D10018", exchange)
+        if not data_dir:
+            continue
+        validate_single_csv_per_symbol(
+            report,
+            f"D10018/{exchange}",
+            data_dir,
+            cex_config.get_insurance_symbols(exchange),
+            "_insurance.csv",
+        )
+    for exchange in cex_config.get_supported_exchanges("D10019"):
+        data_dir = cex_config.get_source_dir("D10019", exchange)
+        if not data_dir:
+            continue
+        validate_single_csv_per_symbol(
+            report,
+            f"D10019/{exchange}",
+            data_dir,
+            cex_config.get_earn_coins(exchange),
+            "_onchainstaking.csv",
+        )
 
     print("数据校验结果")
     print(f"错误: {len(report.errors)}")

@@ -3,17 +3,19 @@ from pathlib import Path
 import csv
 import gzip
 
-DATA_DIR = Path("data/src/bybit_future_trade_di")  # 数据目录，路径
+DATA_DIR = Path("data/dylan/src/bybit_future_trade_di")  # 数据目录，路径
 SYMBOL = "BTCUSDT"  # 交易对，字符串
 DATE = "2026-02-11"  # 数据日期，日期
 
 
 def build_file_path(base_dir: Path, symbol: str, date_str: str) -> Path:
+    """构造成交文件路径。"""
     file_name = f"{symbol}{date_str}.csv.gz"
     return base_dir / symbol / file_name
 
 
 def iter_trades(file_path: Path):
+    """遍历压缩成交记录。"""
     with gzip.open(file_path, "rt", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -21,13 +23,21 @@ def iter_trades(file_path: Path):
 
 
 def format_datetime(ts: float | None) -> str:
+    """格式化UTC时间。"""
     if ts is None:
         return "无"
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     return dt.strftime("%Y-%m-%d %H:%M:%S+00:00")
 
 
+def parse_ts_seconds(ts_text: str) -> float:
+    """将秒或毫秒时间戳转成秒。"""
+    ts_value = float(ts_text)
+    return ts_value / 1000 if ts_value > 1e12 else ts_value
+
+
 def aggregate_trades(file_path: Path) -> dict:
+    """聚合单日成交统计。"""
     total = 0
     size_sum = 0.0
     foreign_sum = 0.0
@@ -36,7 +46,7 @@ def aggregate_trades(file_path: Path) -> dict:
     side_stats = {}
     for row in iter_trades(file_path):
         total += 1
-        ts = float(row["timestamp"])
+        ts = parse_ts_seconds(row["timestamp"])
         size = float(row["size"])
         foreign = float(row["foreignNotional"])
         min_ts = ts if min_ts is None else min(min_ts, ts)

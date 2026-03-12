@@ -16,14 +16,15 @@ ROOT_DIR = Path(__file__).resolve().parents[1]  # 项目根目录，路径
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 app_config = importlib.import_module("app_config")  # 项目配置模块，模块
+poly_config = importlib.import_module("poly_config")  # Poly配置模块，模块
 
-EVENT_URL_TEMPLATES = app_config.POLYMARKET_EVENT_TEMPLATES  # 事件地址模板列表，个数
-ASSET_TAGS = app_config.POLYMARKET_ASSET_TAGS  # 资产映射列表，个数
-TIMEZONE_NAME = app_config.POLYMARKET_TZ_NAME  # 时区名称，时区
+EVENT_URL_TEMPLATES = poly_config.POLYMARKET_EVENT_TEMPLATES  # 事件地址模板列表，个数
+ASSET_TAGS = poly_config.POLYMARKET_ASSET_TAGS  # 资产映射列表，个数
+TIMEZONE_NAME = poly_config.POLYMARKET_TZ_NAME  # 时区名称，时区
 USER_AGENT = "Mozilla/5.0"  # 请求标识，字符串
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"  # WebSocket地址，字符串
-RT_DIR = Path("data/src/polymarket_orderbook_rt")  # 原始数据目录，路径
-RT_SS_DIR = Path("data/src/polymarket_orderbook_rt_ss")  # 快照数据目录，路径
+RT_DIR = Path("data/dylan/src/polymarket_orderbook_rt")  # 原始数据目录，路径
+RT_SS_DIR = Path("data/dylan/src/polymarket_orderbook_rt_ss")  # 快照数据目录，路径
 RT_TAG = "polymarket_orderbook_rt"  # 原始数据标识，字符串
 RT_SS_TAG = "polymarket_orderbook_rt_ss"  # 快照数据标识，字符串
 HTTP_TIMEOUT_SECONDS = app_config.HTTP_TIMEOUT_SECONDS  # 事件请求超时，秒
