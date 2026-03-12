@@ -395,7 +395,7 @@ def filter_logs_for_status(log_lines: list, exchange: str, status_key: str) -> l
     if strict:
         return strict
     fuzzy = [line for line in log_lines if symbol_text in line]
-    return fuzzy
+    return fuzzy if fuzzy else log_lines
 
 
 def build_tasks():

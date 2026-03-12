@@ -515,11 +515,13 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
     start_day = missing_dates[0]
     end_day = missing_dates[-1]
     month_tag = start_day[:7]
+    status_update("okx", symbol, (synced_days, f"月 {month_tag} 请求中"))
+    log(f"okx {symbol} 请求月包: {month_tag}")
     try:
         urls = fetch_okx_download_urls(symbol, start_day, end_day, "monthly")
     except NetworkRequestError as exc:
-        log(f"okx {symbol} 请求失败，结束本轮: {exc}")
-        return synced_days, False
+        log(f"okx {symbol} 月包请求失败，改走日包: {exc}")
+        urls = []
     time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
     if urls:
         for url in urls:
@@ -528,17 +530,21 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
                 synced_days += len(missing_dates)
                 status_update("okx", symbol, (synced_days, f"月 {month_tag} {file_name}"))
                 return synced_days, True
-    try:
-        urls = fetch_okx_download_urls(symbol, start_day, end_day, "daily")
-    except NetworkRequestError as exc:
-        log(f"okx {symbol} 请求失败，结束本轮: {exc}")
-        return synced_days, False
-    time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
-    for url in urls:
-        file_name = url.rsplit("/", 1)[-1]
-        if download_okx_archive(base_dir, symbol, url, f"okx:{symbol}:day:{url}", fail_path):
+    for day_text in missing_dates:
+        status_update("okx", symbol, (synced_days, f"日 {day_text} 请求中"))
+        log(f"okx {symbol} 请求日包: {day_text}")
+        try:
+            urls = fetch_okx_download_urls(symbol, day_text, day_text, "daily")
+        except NetworkRequestError as exc:
+            log(f"okx {symbol} {day_text} 日包请求失败，跳过当日: {exc}")
+            continue
+        time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
+        if not urls:
+            status_update("okx", symbol, (synced_days, f"日 {day_text} 无文件"))
+            continue
+        file_name = urls[0].rsplit("/", 1)[-1]
+        if download_okx_archive(base_dir, symbol, urls[0], f"okx:{symbol}:day:{day_text}", fail_path):
             synced_days += 1
-        day_text = file_name[-17:-7] if len(file_name) >= 17 else month_tag
         status_update("okx", symbol, (synced_days, f"日 {day_text} {file_name}"))
     return synced_days, True
 

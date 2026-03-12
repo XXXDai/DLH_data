@@ -463,12 +463,8 @@ def align_to_utc_4h(market: str) -> None:
 
 def run_market(market: str) -> None:
     """运行指定市场的历史订单簿下载任务。"""
-    aligned = False
     dataset_id = dataset_id_for_market(market)
     while True:
-        if not aligned:
-            align_to_utc_4h(market)
-            aligned = True
         mark_unsupported_exchanges(market)
         for exchange in cex_config.get_supported_exchanges(dataset_id):
             for symbol in resolve_symbols(exchange, market):
