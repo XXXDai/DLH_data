@@ -11,19 +11,19 @@ EXCHANGE_ENABLED = {
 }  # 交易所总开关映射，映射
 
 SPOT_SYMBOLS = {
-    "bybit": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Bybit现货交易对列表，个数
+    "bybit": ["AAPLXUSDT", "AMZNXUSDT", "COINXUSDT", "CRCLXUSDT", "GOOGLXUSDT", "HOODXUSDT", "MCDXUSDT", "METAXUSDT", "NVDAXUSDT", "TSLAXUSDT"],  # Bybit现货交易对列表，个数
     "binance": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Binance现货交易对列表，个数
     "bitget": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Bitget现货交易对列表，个数
     "okx": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],  # OKX现货交易对列表，个数
 }  # 现货交易对映射，映射
 FUTURE_PERPETUAL_SYMBOLS = {
-    "bybit": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Bybit永续交易对列表，个数
+    "bybit": [],  # Bybit永续交易对列表，个数
     "binance": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Binance永续交易对列表，个数
     "bitget": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Bitget永续交易对列表，个数
     "okx": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"],  # OKX永续交易对列表，个数
 }  # 永续交易对映射，映射
 FUTURE_DELIVERY_FAMILIES = {
-    "bybit": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # Bybit交割合约家族列表，个数
+    "bybit": [],  # Bybit交割合约家族列表，个数
     "binance": [],  # Binance交割合约家族列表，个数
     "bitget": [],  # Bitget交割合约家族列表，个数
     "okx": ["BTC-USDT", "ETH-USDT", "SOL-USDT"],  # OKX交割合约家族列表，个数
@@ -138,19 +138,19 @@ XSTOCK_FUNDING_SYMBOLS = {
 }  # 美股代币资金费交易对映射，映射
 
 DATASET_SUPPORT = {
-    "D10001": {"bybit": True, "binance": False, "bitget": False, "okx": True},  # D10001支持矩阵，映射
-    "D10005": {"bybit": True, "binance": False, "bitget": False, "okx": True},  # D10005支持矩阵，映射
-    "D10002-4": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10002-4支持矩阵，映射
+    "D10001": {"bybit": False, "binance": False, "bitget": False, "okx": True},  # D10001支持矩阵，映射
+    "D10005": {"bybit": False, "binance": False, "bitget": False, "okx": True},  # D10005支持矩阵，映射
+    "D10002-4": {"bybit": False, "binance": True, "bitget": True, "okx": True},  # D10002-4支持矩阵，映射
     "D10006-8": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10006-8支持矩阵，映射
-    "D10011": {"bybit": True, "binance": False, "bitget": False, "okx": True},  # D10011支持矩阵，映射
-    "D10012": {"bybit": True, "binance": False, "bitget": False, "okx": True},  # D10012支持矩阵，映射
-    "D10013": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10013支持矩阵，映射
+    "D10011": {"bybit": False, "binance": False, "bitget": False, "okx": True},  # D10011支持矩阵，映射
+    "D10012": {"bybit": False, "binance": False, "bitget": False, "okx": True},  # D10012支持矩阵，映射
+    "D10013": {"bybit": False, "binance": True, "bitget": True, "okx": True},  # D10013支持矩阵，映射
     "D10014": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10014支持矩阵，映射
-    "D10015": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10015支持矩阵，映射
+    "D10015": {"bybit": False, "binance": True, "bitget": True, "okx": True},  # D10015支持矩阵，映射
     "D10016": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10016支持矩阵，映射
-    "D10017": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10017支持矩阵，映射
-    "D10018": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10018支持矩阵，映射
-    "D10019": {"bybit": True, "binance": True, "bitget": True, "okx": True},  # D10019支持矩阵，映射
+    "D10017": {"bybit": False, "binance": True, "bitget": True, "okx": True},  # D10017支持矩阵，映射
+    "D10018": {"bybit": False, "binance": True, "bitget": True, "okx": True},  # D10018支持矩阵，映射
+    "D10019": {"bybit": False, "binance": True, "bitget": True, "okx": True},  # D10019支持矩阵，映射
 }  # 数据集支持矩阵，映射
 
 DATASET_START_DATES = {
