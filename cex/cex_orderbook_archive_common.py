@@ -68,20 +68,33 @@ CHUNK_SIZE = app_config.CHUNK_SIZE  # 下载块大小，字节
 QUIET = False  # 静默模式开关，开关
 STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
+MARKET_QUIET = {}  # 分市场静默模式映射，映射
+MARKET_STATUS_HOOK = {}  # 分市场状态回调映射，映射
+MARKET_LOG_HOOK = {}  # 分市场日志回调映射，映射
 
 
-def log(message: str) -> None:
-    """输出日志消息。"""
-    if LOG_HOOK:
-        LOG_HOOK(message)
-    if not QUIET:
+def configure_market_runtime(market: str, quiet: bool, status_hook, log_hook) -> None:
+    """配置市场运行时回调。"""
+    MARKET_QUIET[market] = quiet
+    MARKET_STATUS_HOOK[market] = status_hook
+    MARKET_LOG_HOOK[market] = log_hook
+
+
+def log_market(market: str, message: str) -> None:
+    """输出指定市场的日志消息。"""
+    log_hook = MARKET_LOG_HOOK.get(market, LOG_HOOK)
+    quiet = MARKET_QUIET.get(market, QUIET)
+    if log_hook:
+        log_hook(message)
+    if not quiet:
         print(message)
 
 
 def status_update(exchange: str, market: str, symbol: str, value) -> None:
     """更新统一状态键的状态值。"""
-    if STATUS_HOOK:
-        STATUS_HOOK(cex_config.get_status_key(exchange, market, symbol), value)
+    status_hook = MARKET_STATUS_HOOK.get(market, STATUS_HOOK)
+    if status_hook:
+        status_hook(cex_config.get_status_key(exchange, market, symbol), value)
 
 
 def dataset_id_for_market(market: str) -> str:
@@ -407,7 +420,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
             continue
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"重试 {date_str} {file_name}"))
-        log(f"{exchange} {market} {symbol} 重试日包: {date_str}")
+        log_market(market, f"{exchange} {market} {symbol} 重试日包: {date_str}")
         if download_date(exchange, market, symbol, date_str):
             done_count += 1
             existing_dates.add(date_str)
@@ -428,12 +441,12 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
             status_update(exchange, market, symbol, (done_count, f"日 {synced_until} 准备回补"))
     else:
         status_update(exchange, market, symbol, (done_count, f"准备 {next_date}"))
-    log(f"{exchange} {market} {symbol} 开始回补: {next_date} -> {end_date}")
+    log_market(market, f"{exchange} {market} {symbol} 开始回补: {next_date} -> {end_date}")
     total = len(date_list)
     for index, date_str in enumerate(date_list, 1):
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} 请求中"))
-        log(f"{exchange} {market} {symbol} 请求日包: {date_str}")
+        log_market(market, f"{exchange} {market} {symbol} 请求日包: {date_str}")
         if download_date(exchange, market, symbol, date_str):
             done_count += 1
             existing_dates.add(date_str)
@@ -451,7 +464,7 @@ def resolve_symbols(exchange: str, market: str) -> list[str]:
         try:
             symbols.update(list_bybit_delivery_symbols_since(cex_config.get_min_start_date(dataset_id_for_market(market), "bybit")))
         except NetworkRequestError as exc:
-            log(f"bybit future 动态交割合约刷新失败，继续使用静态列表: {exc}")
+            log_market(market, f"bybit future 动态交割合约刷新失败，继续使用静态列表: {exc}")
     return sorted(symbols)
 
 
@@ -471,7 +484,7 @@ def align_to_utc_4h(market: str) -> None:
     sleep_seconds = seconds_until_next_utc_4h()
     if sleep_seconds <= 1:
         return
-    log(f"{market} 启动对齐，等待 {sleep_seconds} 秒后执行（UTC 4小时倍数）")
+    log_market(market, f"{market} 启动对齐，等待 {sleep_seconds} 秒后执行（UTC 4小时倍数）")
     time.sleep(sleep_seconds)
 
 
@@ -484,5 +497,5 @@ def run_market(market: str) -> None:
             for symbol in resolve_symbols(exchange, market):
                 sync_symbol(exchange, market, symbol)
         sleep_seconds = seconds_until_next_utc_4h()
-        log(f"{market} 等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
+        log_market(market, f"{market} 等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
         time.sleep(sleep_seconds)

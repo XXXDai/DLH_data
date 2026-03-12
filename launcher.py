@@ -24,6 +24,14 @@ import D10018.d10018download as d10018download
 import D10019.d10019download as d10019download
 
 
+def apply_storage_mode_from_argv() -> None:
+    """根据启动参数设置存储模式。"""
+    app_config.DATA_STORAGE_MODE = "s3" if "-s3" in sys.argv else "local"
+
+
+apply_storage_mode_from_argv()
+
+
 TASK_DEFS = [
     ("D10001", "D10001 下载", d10001download, None),
     ("D10005", "D10005 下载", d10005download, None),

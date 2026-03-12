@@ -8,9 +8,7 @@ LOG_HOOK = None  # 日志回调函数，函数
 
 def run() -> None:
     """运行现货历史订单簿下载任务。"""
-    orderbook_archive_common.QUIET = QUIET
-    orderbook_archive_common.STATUS_HOOK = STATUS_HOOK
-    orderbook_archive_common.LOG_HOOK = LOG_HOOK
+    orderbook_archive_common.configure_market_runtime("spot", QUIET, STATUS_HOOK, LOG_HOOK)
     orderbook_archive_common.run_market("spot")
 
 

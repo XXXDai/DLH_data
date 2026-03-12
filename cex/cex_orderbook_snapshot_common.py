@@ -37,13 +37,23 @@ BATCH_SIZE = 20000  # Parquet批次大小，条
 SMALL_BATCH_SIZE = 100  # 超大深度Parquet批次大小，条
 QUIET = False  # 静默模式开关，开关
 LOG_HOOK = None  # 日志回调函数，函数
+DATASET_QUIET = {}  # 分数据集静默模式映射，映射
+DATASET_LOG_HOOK = {}  # 分数据集日志回调映射，映射
 
 
-def log(message: str) -> None:
-    """输出日志消息。"""
-    if LOG_HOOK:
-        LOG_HOOK(message)
-    if not QUIET:
+def configure_dataset_runtime(output_dataset_id: str, quiet: bool, log_hook) -> None:
+    """配置数据集运行时回调。"""
+    DATASET_QUIET[output_dataset_id] = quiet
+    DATASET_LOG_HOOK[output_dataset_id] = log_hook
+
+
+def log(output_dataset_id: str, message: str) -> None:
+    """输出指定数据集的日志消息。"""
+    log_hook = DATASET_LOG_HOOK.get(output_dataset_id, LOG_HOOK)
+    quiet = DATASET_QUIET.get(output_dataset_id, QUIET)
+    if log_hook:
+        log_hook(message)
+    if not quiet:
         print(message)
 
 
@@ -317,13 +327,13 @@ def is_valid_archive(file_path: Path) -> bool:
     return False
 
 
-def process_date(input_dataset_id: str, exchange: str, input_dir: Path, output_dir: Path, symbol: str, date_str: str) -> None:
+def process_date(input_dataset_id: str, output_dataset_id: str, exchange: str, input_dir: Path, output_dir: Path, symbol: str, date_str: str) -> None:
     """处理单日订单簿归档。"""
     input_path = build_input_path(input_dataset_id, exchange, input_dir, symbol, date_str)
     if not input_path.exists() and not download_file_from_storage(input_path):
         return
     if not is_valid_archive(input_path):
-        log(f"文件不是有效压缩包: {input_path}")
+        log(output_dataset_id, f"文件不是有效压缩包: {input_path}")
         input_path.unlink()
         return
     output_path = build_output_path(input_dataset_id, exchange, output_dir, symbol, date_str)
@@ -361,7 +371,7 @@ def process_date(input_dataset_id: str, exchange: str, input_dir: Path, output_d
         write_parquet(batch, writer, schema)
     writer.close()
     replace_output_file(tmp_output_path, output_path)
-    log(f"已写入: {output_path}，记录数: {total}")
+    log(output_dataset_id, f"已写入: {output_path}，记录数: {total}")
 
 
 def parse_date_from_name(input_dataset_id: str, exchange: str, file_name: str, symbol: str) -> str | None:
@@ -416,7 +426,7 @@ def run_dataset(input_dataset_id: str, output_dataset_id: str) -> None:
                 continue
             for symbol in resolve_symbols(input_dataset_id, exchange, input_dir):
                 for date_str in iter_available_dates(input_dataset_id, exchange, input_dir, symbol, start_date):
-                    process_date(input_dataset_id, exchange, input_dir, output_dir, symbol, date_str)
+                    process_date(input_dataset_id, output_dataset_id, exchange, input_dir, output_dir, symbol, date_str)
         sleep_seconds = seconds_until_next_utc_midnight()
-        log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
+        log(output_dataset_id, f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
         time.sleep(sleep_seconds)

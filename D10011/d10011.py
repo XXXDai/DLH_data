@@ -7,8 +7,7 @@ LOG_HOOK = None  # 日志回调函数，函数
 
 def run() -> None:
     """运行期货历史订单簿快照任务。"""
-    orderbook_snapshot_common.QUIET = QUIET
-    orderbook_snapshot_common.LOG_HOOK = LOG_HOOK
+    orderbook_snapshot_common.configure_dataset_runtime("D10011", QUIET, LOG_HOOK)
     orderbook_snapshot_common.run_dataset("D10001", "D10011")
 
 
