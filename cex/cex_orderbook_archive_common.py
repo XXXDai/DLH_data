@@ -395,7 +395,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         start_dt += timedelta(days=1)
     end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
     if start_dt > end_dt:
-        status_update(exchange, market, symbol, (done_count, "已是最新"))
+        status_update(exchange, market, symbol, (done_count, f"日 {latest_local or end_dt.strftime('%Y-%m-%d')} 已是最新"))
         return
     date_list = list(iter_dates(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")))
     total = len(date_list)

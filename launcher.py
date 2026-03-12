@@ -342,6 +342,30 @@ def get_last_update_text(task_id: str, exchange: str, bucket: dict, status_times
     return time.strftime("%H:%M:%S", time.localtime(last_ts)) if last_ts else "-"
 
 
+def sync_text_sort_key(text: str) -> str:
+    """将同步日期文本转换为可排序字符串。"""
+    text = (text or "").strip()
+    if len(text) == 7:
+        return f"{text}-31"
+    return text
+
+
+def get_synced_until_text(task_id: str, bucket: dict) -> str:
+    """返回任务当前已同步到的日期文本。"""
+    if task_id not in {"D10001", "D10005", "D10013", "D10014"}:
+        return "-"
+    latest_text = ""
+    for value in bucket.values():
+        if not (isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float))):
+            continue
+        _progress, date_text, _file_name = parse_download_status(str(value[1]))
+        if date_text == "-":
+            continue
+        if sync_text_sort_key(date_text) >= sync_text_sort_key(latest_text):
+            latest_text = date_text
+    return latest_text or "-"
+
+
 def simplify_status_key(exchange: str, key: str) -> str:
     """简化状态键显示文本。"""
     prefix = f"{exchange}/"
@@ -616,12 +640,12 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 stdscr,
                 task_subheader_row,
                 0,
-                "名称               状态     计数     更新时间",
+                "名称               状态     计数     已同步到   更新时间",
                 max_cols - 1,
                 header_attr,
             )
         row = task_content_row
-        name_cells = max(8, max_cols - 28)
+        name_cells = max(8, max_cols - 40)
         for idx, task in enumerate(exchange_tasks[task_scroll : task_scroll + task_visible_rows]):
             item_index = task_scroll + idx
             if row >= task_rule_row:
@@ -629,6 +653,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             status = "运行中" if task.is_running() else "已退出"
             counts = get_status_bucket_for_exchange(task.task_id, current_exchange, status_counts)
             total_count = get_total_count(counts)
+            synced_until_text = get_synced_until_text(task.task_id, counts)
             last_text = get_last_update_text(task.task_id, current_exchange, counts, status_times, status_meta)
             selected_attr = focus_attr if item_index == task_selected[current_exchange] and focus == "tasks" else 0
             status_attr = ok_attr if task.is_running() else bad_attr
@@ -647,6 +672,14 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 stdscr,
                 row,
                 2 + name_cells + 1 + 7 + 8,
+                pad_to_cells(synced_until_text, 10),
+                10,
+                selected_attr,
+            )
+            draw_clipped_text(
+                stdscr,
+                row,
+                2 + name_cells + 1 + 7 + 8 + 11,
                 pad_to_cells(last_text, 8),
                 8,
                 selected_attr,
@@ -670,7 +703,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     next_text, countdown_text = schedule_cache.get(current.task_id, ("-", "-"))
                 else:
                     next_text, countdown_text = "-", "-"
-                schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text}"
+                synced_until_text = get_synced_until_text(current.task_id, get_status_bucket_for_exchange(current.task_id, current_exchange, status_counts))
+                schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text} | 已同步到: {synced_until_text}"
                 draw_clipped_text(stdscr, detail_subheader_row, log_col, schedule_header, log_width, warm_attr)
             status_items = []
             ws_tasks = {"D10002-4", "D10006-8", "D10022-23"}

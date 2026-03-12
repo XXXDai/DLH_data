@@ -507,7 +507,8 @@ def run_exchange(exchange: str, symbols: list, latest_date_getter, month_worker)
         next_date = next_sync_date(start_date, latest_local)
         next_dt = datetime.strptime(next_date, "%Y-%m-%d")
         if next_dt > end_dt:
-            status_update(exchange, symbol, (synced_days, "已是最新"))
+            latest_text = latest_local or end_dt.strftime("%Y-%m-%d")
+            status_update(exchange, symbol, (synced_days, f"日 {latest_text} 已是最新"))
             continue
         state_list.append({"symbol": symbol, "next_date": next_date, "synced_days": synced_days})
         month_anchor_dates.append(next_date)
