@@ -6,6 +6,7 @@ import csv
 import gzip
 import json
 import socket
+import threading
 import time
 import zipfile
 from urllib.error import HTTPError, URLError
@@ -25,6 +26,7 @@ from cex import cex_config
 
 
 PART_FILE_STALE_SECONDS = 30 * 60  # 临时文件过期时间，秒
+FAILURE_FILE_LOCK = threading.Lock()  # 失败记录文件写入锁，锁对象
 
 
 def is_s3_storage_mode() -> bool:
@@ -237,13 +239,14 @@ def remove_failure(failures: list, failure_key: str) -> None:
 
 def update_failure_file(path: Path, record: dict | None, failure_key: str) -> list:
     """更新失败记录文件。"""
-    failures = load_failures(path)
-    if record is None:
-        remove_failure(failures, failure_key)
-    else:
-        upsert_failure(failures, record)
-    save_failures(path, failures)
-    return failures
+    with FAILURE_FILE_LOCK:
+        failures = load_failures(path)
+        if record is None:
+            remove_failure(failures, failure_key)
+        else:
+            upsert_failure(failures, record)
+        save_failures(path, failures)
+        return failures
 
 
 def write_gzip_csv_rows(file_path: Path, fieldnames: list[str], rows: list[dict], append: bool) -> int:

@@ -246,6 +246,27 @@ def pad_to_cells(text: str, target_cells: int) -> str:
     return text + (" " * (target_cells - used))
 
 
+def build_curses_attr(color_enabled: bool, pair_id: int, extra_attr: int = 0) -> int:
+    """构造颜色与样式属性。"""
+    if not color_enabled:
+        return extra_attr
+    return curses.color_pair(pair_id) | extra_attr
+
+
+def draw_clipped_text(stdscr, row: int, col: int, text: str, max_cells: int, attr: int = 0) -> None:
+    """按最大宽度绘制裁剪后的文本。"""
+    if max_cells <= 0:
+        return
+    stdscr.addstr(row, col, truncate_by_cells(text, max_cells), attr)
+
+
+def draw_rule(stdscr, row: int, col: int, width: int) -> None:
+    """绘制水平分隔线。"""
+    if width <= 0:
+        return
+    stdscr.hline(row, col, curses.ACS_HLINE, width)
+
+
 def parse_download_status(text: str) -> tuple[str, str, str]:
     """解析下载状态文本。"""
     text = (text or "").strip()
@@ -494,6 +515,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         curses.use_default_colors()
         curses.init_pair(1, curses.COLOR_GREEN, -1)
         curses.init_pair(2, curses.COLOR_RED, -1)
+        curses.init_pair(3, curses.COLOR_CYAN, -1)
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)
     exchanges, grouped_tasks = group_tasks_by_exchange(tasks)
     if not exchanges:
         return
@@ -511,7 +534,31 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         if max_rows <= 0 or max_cols <= 0:
             time.sleep(app_config.TUI_REFRESH_SECONDS)
             continue
-        list_width = max(30, max_cols // 3)
+        title_attr = build_curses_attr(color_enabled, 3, curses.A_BOLD)
+        ok_attr = build_curses_attr(color_enabled, 1, curses.A_BOLD)
+        bad_attr = build_curses_attr(color_enabled, 2, curses.A_BOLD)
+        warm_attr = build_curses_attr(color_enabled, 4, curses.A_BOLD)
+        focus_attr = curses.A_REVERSE | curses.A_BOLD
+        header_attr = curses.A_BOLD
+        list_width = max(34, min(max_cols // 3, 52))
+        divider_col = min(list_width, max_cols - 2)
+        right_col = divider_col + 2
+        right_width = max(0, max_cols - right_col - 1)
+        header_row = 0
+        tabs_row = 1
+        rule_row = 2
+        section_row = 3
+        subheader_row = 4
+        content_row = 5
+        footer_row = max_rows - 1
+        if max_rows < 8 or max_cols < 60:
+            draw_clipped_text(stdscr, 0, 0, "窗口过小，请放大终端后查看。按 q 退出。", max_cols - 1, warm_attr)
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == ord("q"):
+                break
+            time.sleep(app_config.TUI_REFRESH_SECONDS)
+            continue
         current_exchange = exchanges[selected_exchange]
         exchange_tasks = grouped_tasks.get(current_exchange, [])
         if exchange_tasks:
@@ -519,58 +566,93 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             current = exchange_tasks[task_selected[current_exchange]]
         else:
             current = None
-        stdscr.addstr(0, 0, truncate_by_cells("启动管理（←→切交易所，↑↓切任务，Tab切状态，q退出）", max_cols - 1))
-        tab_items = []
-        for idx, exchange in enumerate(exchanges):
-            label = exchange.upper()
-            if idx == selected_exchange:
-                tab_items.append(f"[{label}]")
-            else:
-                tab_items.append(f" {label} ")
-        if max_rows > 1:
-            stdscr.addstr(1, 0, truncate_by_cells(" ".join(tab_items), max(0, list_width - 1)))
+        title_text = f"DLH Data | 交易所: {current_exchange.upper()} | 焦点: {'状态' if focus == 'status' else '任务'} | 存储: {app_config.DATA_STORAGE_MODE}"
+        draw_clipped_text(stdscr, header_row, 0, title_text, max_cols - 1, title_attr)
+        if max_rows > tabs_row:
+            tab_col = 0
+            for idx, exchange in enumerate(exchanges):
+                label = f" {exchange.upper()} "
+                tab_attr = focus_attr if idx == selected_exchange else header_attr
+                draw_clipped_text(stdscr, tabs_row, tab_col, label, max_cols - tab_col - 1, tab_attr)
+                tab_col += sum(cell_width(ch) for ch in label) + 1
+                if tab_col >= max_cols - 1:
+                    break
+        if max_rows > rule_row:
+            draw_rule(stdscr, rule_row, 0, max_cols - 1)
         now_ts = time.time()
         if now_ts - last_schedule_ts >= SCHEDULE_REFRESH_SECONDS:
             last_schedule_ts = now_ts
             schedule_cache.clear()
             for task in tasks:
                 schedule_cache[task.task_id] = compute_next_trigger(task.task_id)
-        if max_rows > 2:
-            stdscr.addstr(
-                2,
+        if max_rows > section_row:
+            draw_clipped_text(
+                stdscr,
+                section_row,
                 0,
-                truncate_by_cells("任务 | 状态 | 计数 | 更新时间", max(0, list_width - 1)),
+                f"任务列表  {len(exchange_tasks)} 项",
+                max(0, divider_col - 1),
+                header_attr,
             )
-        row = 3
+        if max_rows > subheader_row:
+            draw_clipped_text(
+                stdscr,
+                subheader_row,
+                0,
+                "名称               状态     计数     更新时间",
+                max(0, divider_col - 1),
+                header_attr,
+            )
+        if divider_col < max_cols - 1 and footer_row > rule_row:
+            stdscr.vline(rule_row + 1, divider_col, curses.ACS_VLINE, max(0, footer_row - rule_row - 1))
+        row = content_row
+        name_cells = max(8, divider_col - 25)
         for idx, task in enumerate(exchange_tasks):
-            if row >= max_rows:
+            if row >= footer_row:
                 break
             status = "运行中" if task.is_running() else "已退出"
             counts = get_status_bucket_for_exchange(task.task_id, current_exchange, status_counts)
             total_count = get_total_count(counts)
             last_text = get_last_update_text(task.task_id, current_exchange, counts, status_times, status_meta)
-            prefix = ">" if idx == task_selected[current_exchange] else " "
-            line = f"{prefix} {task.name} | {status} | {total_count} | {last_text}"
-            if list_width > 1:
-                stdscr.addstr(row, 0, truncate_by_cells(line, list_width - 1))
+            selected_attr = focus_attr if idx == task_selected[current_exchange] and focus == "tasks" else 0
+            status_attr = ok_attr if task.is_running() else bad_attr
+            draw_clipped_text(stdscr, row, 0, ">" if idx == task_selected[current_exchange] else " ", 1, selected_attr)
+            draw_clipped_text(stdscr, row, 2, pad_to_cells(task.name, name_cells), name_cells, selected_attr)
+            draw_clipped_text(stdscr, row, 2 + name_cells + 1, pad_to_cells(status, 6), 6, selected_attr | status_attr)
+            draw_clipped_text(
+                stdscr,
+                row,
+                2 + name_cells + 1 + 7,
+                pad_to_cells(str(total_count), 7),
+                7,
+                selected_attr,
+            )
+            draw_clipped_text(
+                stdscr,
+                row,
+                2 + name_cells + 1 + 7 + 8,
+                pad_to_cells(last_text, 8),
+                8,
+                selected_attr,
+            )
             row += 1
-        list_height = max(0, row - 3)
+        list_height = max(0, footer_row - content_row)
         if current:
             log_lines = list(logs.get(current.task_id, []))
             pending_line = pending.get(current.task_id, "")
             if pending_line:
                 log_lines = log_lines + [pending_line]
             log_lines = filter_logs_for_exchange(log_lines, current_exchange)
-            log_start = 3
-            log_col = list_width + 1
-            if max_rows > 2 and log_col < max_cols - 1:
-                stdscr.addstr(1, log_col, truncate_by_cells(f"{current_exchange.upper()} / {current.name}", max_cols - log_col - 1))
+            log_start = content_row
+            log_col = right_col
+            if max_rows > section_row and right_width > 0:
+                draw_clipped_text(stdscr, section_row, log_col, f"{current_exchange.upper()} / {current.name}", right_width, header_attr)
                 if current.is_running():
                     next_text, countdown_text = schedule_cache.get(current.task_id, ("-", "-"))
                 else:
                     next_text, countdown_text = "-", "-"
                 schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text}"
-                stdscr.addstr(2, log_col, truncate_by_cells(schedule_header, max_cols - log_col - 1))
+                draw_clipped_text(stdscr, subheader_row, log_col, schedule_header, right_width, warm_attr)
             status_items = []
             ws_tasks = {"D10002-4", "D10006-8", "D10022-23"}
             if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10017", "D10018", "D10019", "D10002-4", "D10006-8"}:
@@ -614,7 +696,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 if current.task_id in {"D10001", "D10005", "D10013", "D10014"}:
                     status_header = ("对象", "完成", "进度", "日期", "文件名")
                 header_rows = 1 if status_header else 0
-                status_height = min(total, max(0, list_height - header_rows))
+                max_status_rows = max(0, min(total, max(4, list_height // 2)))
+                status_height = min(total, max(0, max_status_rows - header_rows))
                 status_height_cached = status_height
                 status_selected_index = max(0, min(status_selected_index, total - 1))
                 if status_selected_index < status_scroll:
@@ -628,7 +711,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     title_line = f"{title} {status_scroll + 1}-{end_idx}/{total}"
                 else:
                     title_line = title
-                stdscr.addstr(log_start, log_col, truncate_by_cells(title_line, available))
+                draw_clipped_text(stdscr, log_start, log_col, title_line, available, header_attr)
                 if status_header:
                     max_symbol_cells = 0
                     max_done_cells = 0
@@ -659,13 +742,13 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                         + " "
                         + pad_to_cells(status_header[4], file_cells)
                     )
-                    stdscr.addstr(log_start + 1, log_col, truncate_by_cells(header_text, available))
+                    draw_clipped_text(stdscr, log_start + 1, log_col, header_text, available, header_attr)
                 for idx in range(status_height):
                     item_index = status_scroll + idx
                     if item_index >= total:
                         break
                     target_row = log_start + 1 + header_rows + idx
-                    if target_row >= max_rows:
+                    if target_row >= footer_row:
                         break
                     if available <= 0:
                         break
@@ -685,7 +768,14 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                             + " "
                             + truncate_by_cells(str(file_name), file_cells)
                         )
-                        stdscr.addstr(target_row, log_col, truncate_by_cells(row_text, available))
+                        draw_clipped_text(
+                            stdscr,
+                            target_row,
+                            log_col,
+                            row_text,
+                            available,
+                            focus_attr if item_index == status_selected_index and focus == "status" else 0,
+                        )
                         continue
                     prefix = "> " if item_index == status_selected_index else "  "
                     line_text = prefix + line_text
@@ -704,26 +794,49 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                                 text_col = text_col + dot_width + 1
                         text_available = max_cols - text_col - 1
                         if text_available > 0:
-                            stdscr.addstr(target_row, text_col, truncate_by_cells(line_text, text_available))
+                            draw_clipped_text(
+                                stdscr,
+                                target_row,
+                                text_col,
+                                line_text,
+                                text_available,
+                                focus_attr if item_index == status_selected_index and focus == "status" else 0,
+                            )
                     else:
-                        stdscr.addstr(target_row, log_col, truncate_by_cells(line_text, available))
+                        draw_clipped_text(
+                            stdscr,
+                            target_row,
+                            log_col,
+                            line_text,
+                            available,
+                            focus_attr if item_index == status_selected_index and focus == "status" else 0,
+                        )
                 log_start = log_start + status_height + 1 + header_rows
                 status_selected_map[view_key] = status_selected_index
                 status_scroll_map[view_key] = status_scroll
                 if focus == "status":
                     selected_key = status_items[status_selected_index][0]
                     log_lines = filter_logs_for_status(log_lines, current_exchange, selected_key)
-            visible_lines = max_rows - log_start - 1
+            if log_start < footer_row and right_width > 0:
+                draw_rule(stdscr, log_start, log_col, right_width)
+                log_start += 1
+                draw_clipped_text(stdscr, log_start, log_col, "日志窗口", right_width, header_attr)
+                log_start += 1
+            visible_lines = footer_row - log_start
             tail_lines = log_lines[-visible_lines:] if visible_lines > 0 else []
             for idx, line in enumerate(tail_lines):
                 text = line
                 target_row = log_start + idx
-                if target_row >= max_rows:
+                if target_row >= footer_row:
                     break
                 available = max_cols - log_col - 1
                 if available <= 0:
                     break
-                stdscr.addstr(target_row, log_col, truncate_by_cells(text, available))
+                draw_clipped_text(stdscr, target_row, log_col, text, available)
+        footer_text = "←→ 切交易所  ↑↓ 切选中项  Tab 切换焦点  PgUp/PgDn 翻状态  q 退出"
+        if footer_row > 0:
+            draw_rule(stdscr, footer_row - 1, 0, max_cols - 1)
+        draw_clipped_text(stdscr, footer_row, 0, footer_text, max_cols - 1, warm_attr)
         stdscr.refresh()
         key = stdscr.getch()
         if key == ord("q"):
