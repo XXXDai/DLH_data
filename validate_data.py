@@ -260,8 +260,9 @@ def validate_bitget_trade_raw_di(
     base_symbols: list[str],
     allow_delivery: bool,
     start_date: str,
+    file_prefix_style: str,
 ) -> None:
-    """校验Bitget原始成交归档目录。"""
+    """校验Bitget成交目录。"""
     if not data_dir.exists():
         report.warn(f"{dataset_id} 数据目录不存在: {data_dir}")
         return
@@ -290,9 +291,29 @@ def validate_bitget_trade_raw_di(
             if name.endswith(".part"):
                 report.warn(f"{dataset_id} 发现临时文件，可能是未完成下载: {file_path}")
                 continue
+            if name.endswith(".csv.gz"):
+                if file_prefix_style == "concat":
+                    if not name.startswith(symbol) or not name.endswith(".csv.gz"):
+                        report.error(f"{dataset_id} 文件名交易对不匹配: {file_path}")
+                        continue
+                    date_text = name[len(symbol) : -len(".csv.gz")]
+                else:
+                    prefix = f"{symbol}_"
+                    if not name.startswith(prefix) or not name.endswith(".csv.gz"):
+                        report.error(f"{dataset_id} 文件名交易对不匹配: {file_path}")
+                        continue
+                    date_text = name[len(prefix) : -len(".csv.gz")]
+                if not is_valid_ymd(date_text):
+                    report.error(f"{dataset_id} 文件名日期不合法: {file_path}")
+                    continue
+                if file_path.stat().st_size == 0:
+                    report.error(f"{dataset_id} 发现空文件: {file_path}")
+                if has_start_date and date_text < start_date:
+                    report.warn(f"{dataset_id} 发现早于配置起始日期({start_date})的数据: {file_path}")
+                continue
             date_text = parse_bitget_archive_date(name)
             if not date_text:
-                report.error(f"{dataset_id} 文件名不符合Bitget原始归档格式: {file_path}")
+                report.error(f"{dataset_id} 文件名不符合Bitget成交格式: {file_path}")
                 continue
             if not is_valid_ymd(date_text):
                 report.error(f"{dataset_id} 文件名日期不合法: {file_path}")
@@ -301,6 +322,8 @@ def validate_bitget_trade_raw_di(
                 report.error(f"{dataset_id} 发现空文件: {file_path}")
             if not zipfile.is_zipfile(file_path):
                 report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
+            else:
+                report.warn(f"{dataset_id} 发现旧版Bitget zip归档: {file_path}")
             if has_start_date and date_text < start_date:
                 report.warn(f"{dataset_id} 发现早于配置起始日期({start_date})的数据: {file_path}")
 
@@ -436,6 +459,7 @@ def main() -> int:
                 sorted(set(cex_config.get_future_trade_symbols(exchange)) | set(cex_config.get_delivery_families(exchange))),
                 exchange in {"bybit", "okx"},
                 cex_config.get_min_start_date("D10013", exchange),
+                "concat",
             )
         else:
             validate_trade_di(
@@ -459,6 +483,7 @@ def main() -> int:
                 cex_config.get_spot_trade_symbols(exchange),
                 False,
                 cex_config.get_min_start_date("D10014", exchange),
+                "underscore",
             )
         else:
             validate_trade_di(

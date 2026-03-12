@@ -352,7 +352,7 @@ def sync_text_sort_key(text: str) -> str:
 
 def get_synced_until_text(task_id: str, bucket: dict) -> str:
     """返回任务当前已同步到的日期文本。"""
-    if task_id not in {"D10001", "D10005", "D10013", "D10014"}:
+    if task_id not in {"D10001", "D10005", "D10013", "D10014", "D10017", "D10018", "D10019"}:
         return "-"
     latest_text = ""
     for value in bucket.values():

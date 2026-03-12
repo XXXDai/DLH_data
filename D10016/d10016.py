@@ -12,8 +12,11 @@ import pyarrow.parquet as pq
 from cex import cex_config
 from cex.cex_common import build_part_path
 from cex.cex_common import cleanup_stale_part_file
+from cex.cex_common import download_file_from_storage
+from cex.cex_common import list_storage_file_names
 from cex.cex_common import replace_output_file
 from cex.cex_common import seconds_until_next_utc_4h
+from cex.cex_common import storage_file_exists
 from cex.cex_trade_common import normalize_trade_for_agg
 
 
@@ -52,7 +55,16 @@ def build_input_path(base_dir: Path, symbol: str, date_str: str) -> Path:
 
 def build_bitget_input_paths(base_dir: Path, symbol: str, date_str: str) -> list[Path]:
     """列出Bitget原始分片路径。"""
-    return sorted((base_dir / symbol).glob(f"{date_str.replace('-', '')}_*.zip"))
+    csv_path = build_input_path(base_dir, symbol, date_str)
+    if storage_file_exists(csv_path):
+        return [csv_path]
+    paths = []
+    for file_name in list_storage_file_names(base_dir / symbol):
+        if not file_name.endswith(".zip"):
+            continue
+        if parse_bitget_date_from_name(file_name) == date_str:
+            paths.append(base_dir / symbol / file_name)
+    return sorted(paths)
 
 
 def build_output_path(base_dir: Path, symbol: str, date_str: str) -> Path:
@@ -81,7 +93,7 @@ def iter_zip_trades(file_path: Path):
 
 def iter_trades(exchange: str, file_path: Path):
     """按交易所遍历成交记录。"""
-    if exchange == "bitget":
+    if file_path.name.endswith(".zip"):
         yield from iter_zip_trades(file_path)
         return
     yield from iter_gzip_trades(file_path)
@@ -90,6 +102,9 @@ def iter_trades(exchange: str, file_path: Path):
 def list_input_paths(exchange: str, base_dir: Path, symbol: str, date_str: str) -> list[Path]:
     """列出单日输入文件列表。"""
     if exchange == "bitget":
+        input_path = build_input_path(base_dir, symbol, date_str)
+        if input_path.exists():
+            return [input_path]
         return build_bitget_input_paths(base_dir, symbol, date_str)
     input_path = build_input_path(base_dir, symbol, date_str)
     return [input_path] if input_path.exists() else []
@@ -122,13 +137,16 @@ def process_date(exchange: str, symbol: str, date_str: str) -> None:
     if not input_paths:
         return
     for input_path in input_paths:
+        if not input_path.exists() and not download_file_from_storage(input_path):
+            return
+    for input_path in input_paths:
         if input_path.stat().st_size == 0:
             log(f"文件为空: {input_path}")
             input_path.unlink()
             return
     output_path = build_output_path(output_dir, symbol, date_str)
     cleanup_stale_part_file(output_path)
-    if output_path.exists():
+    if storage_file_exists(output_path):
         return
     tmp_output_path = build_part_path(output_path)
     if tmp_output_path.exists():
@@ -177,6 +195,10 @@ def parse_bitget_date_from_name(name: str) -> str | None:
 def parse_date_from_name(exchange: str, name: str) -> str | None:
     """从文件名解析日期。"""
     if exchange == "bitget":
+        if name.endswith(".csv.gz"):
+            date_str = name.removesuffix(".csv.gz")[-10:]
+            if DATE_TEXT_PATTERN.fullmatch(date_str):
+                return date_str
         return parse_bitget_date_from_name(name)
     if not name.endswith(".csv.gz"):
         return None
@@ -188,13 +210,9 @@ def parse_date_from_name(exchange: str, name: str) -> str | None:
 
 def iter_available_dates(exchange: str, base_dir: Path, symbol: str) -> list:
     """遍历可处理的日期列表。"""
-    symbol_dir = base_dir / symbol
-    if not symbol_dir.exists():
-        return []
     dates = set()
-    pattern = "*.zip" if exchange == "bitget" else f"{symbol}_*.csv.gz"
-    for path in symbol_dir.glob(pattern):
-        date_str = parse_date_from_name(exchange, path.name)
+    for file_name in list_storage_file_names(base_dir / symbol):
+        date_str = parse_date_from_name(exchange, file_name)
         if date_str:
             dates.add(date_str)
     return sorted(dates)

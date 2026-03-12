@@ -13,6 +13,7 @@ from urllib.request import urlopen
 
 import app_config
 from cex import cex_config
+from cex.cex_common import download_file_from_storage
 from cex.cex_common import seconds_until_next_utc_midnight
 from cex.cex_common import upload_file_to_s3
 from cex.cex_orderbook_ws_common import NetworkRequestError
@@ -116,6 +117,24 @@ def append_rows(file_path: Path, rows: list) -> int:
             writer.writerow(row)
     upload_file_to_s3(file_path)
     return len(rows)
+
+
+def load_existing_sync_info(file_path: Path) -> tuple[int, str]:
+    """读取现有记录数量与最新采集日期。"""
+    if not file_path.exists():
+        download_file_from_storage(file_path)
+    if not file_path.exists():
+        return 0, ""
+    count = 0
+    latest_date = ""
+    with file_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            count += 1
+            collect_date = str(row.get("collect_date") or "")
+            if collect_date > latest_date:
+                latest_date = collect_date
+    return count, latest_date
 
 
 def fetch_bybit_rows(coin: str) -> list:
@@ -297,14 +316,21 @@ def run_bybit() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for coin in cex_config.get_insurance_symbols(exchange):
+        file_path = build_file_path(base_dir, coin)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update(exchange, "insurance", coin, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update(exchange, "insurance", coin, (existing_count, "准备同步"))
         try:
             rows = fetch_bybit_rows(coin)
         except NetworkRequestError as exc:
             status_update(exchange, "insurance", coin, f"失败 {exc}")
             log(f"{exchange} {coin} 同步失败: {exc}")
             continue
-        count = append_rows(build_file_path(base_dir, coin), rows)
-        status_update(exchange, "insurance", coin, count)
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update(exchange, "insurance", coin, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"{exchange} {coin} 已写入记录数: {count}")
 
 
@@ -317,14 +343,21 @@ def run_binance() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
+        file_path = build_file_path(base_dir, symbol)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update(exchange, "insurance", symbol, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update(exchange, "insurance", symbol, (existing_count, "准备同步"))
         try:
             rows = fetch_binance_rows(symbol)
         except NetworkRequestError as exc:
             status_update(exchange, "insurance", symbol, f"失败 {exc}")
             log(f"{exchange} {symbol} 同步失败: {exc}")
             continue
-        count = append_rows(build_file_path(base_dir, symbol), rows)
-        status_update(exchange, "insurance", symbol, count)
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update(exchange, "insurance", symbol, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"{exchange} {symbol} 已写入记录数: {count}")
 
 
@@ -337,14 +370,21 @@ def run_bitget() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
+        file_path = build_file_path(base_dir, symbol)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update(exchange, "insurance", symbol, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update(exchange, "insurance", symbol, (existing_count, "准备同步"))
         try:
             rows = fetch_bitget_rows(symbol)
         except NetworkRequestError as exc:
             status_update(exchange, "insurance", symbol, f"失败 {exc}")
             log(f"{exchange} {symbol} 同步失败: {exc}")
             continue
-        count = append_rows(build_file_path(base_dir, symbol), rows)
-        status_update(exchange, "insurance", symbol, count)
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update(exchange, "insurance", symbol, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"{exchange} {symbol} 已写入记录数: {count}")
 
 
@@ -357,14 +397,21 @@ def run_okx() -> None:
         return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
+        file_path = build_file_path(base_dir, symbol)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update(exchange, "insurance", symbol, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update(exchange, "insurance", symbol, (existing_count, "准备同步"))
         try:
             rows = fetch_okx_rows(symbol)
         except NetworkRequestError as exc:
             status_update(exchange, "insurance", symbol, f"失败 {exc}")
             log(f"{exchange} {symbol} 同步失败: {exc}")
             continue
-        count = append_rows(build_file_path(base_dir, symbol), rows)
-        status_update(exchange, "insurance", symbol, count)
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update(exchange, "insurance", symbol, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"{exchange} {symbol} 已写入记录数: {count}")
 
 

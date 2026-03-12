@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO, TextIOWrapper
 from pathlib import Path
 import csv
+import gzip
 import json
 import re
 import socket
@@ -17,8 +18,12 @@ from urllib.request import urlopen
 import app_config
 from cex import cex_config
 from cex.cex_common import download_bytes
+from cex.cex_common import count_existing_days
+from cex.cex_common import get_synced_until_date
 from cex.cex_common import iter_dates
 from cex.cex_common import iter_months
+from cex.cex_common import list_missing_dates
+from cex.cex_common import list_storage_file_names
 from cex.cex_common import month_end
 from cex.cex_common import replace_output_file
 from cex.cex_common import seconds_until_next_utc_4h
@@ -26,6 +31,7 @@ from cex.cex_common import update_failure_file
 from cex.cex_common import write_gzip_csv_rows
 from cex.cex_orderbook_ws_common import NetworkRequestError
 from cex.cex_trade_common import NORMALIZED_TRADE_FIELDS
+from cex.cex_trade_common import normalize_bitget_trade_row
 from cex.cex_trade_common import normalize_binance_spot_parts
 from cex.cex_trade_common import normalize_okx_trade_row
 
@@ -181,6 +187,34 @@ def build_okx_query_range(start_day: str, end_day: str) -> tuple[int, int]:
     return begin_ms, end_ms
 
 
+def parse_bitget_date_from_name(file_name: str) -> str | None:
+    """从Bitget文件名解析日期。"""
+    if file_name.endswith(".csv.gz"):
+        date_str = file_name.removesuffix(".csv.gz")[-10:]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+            return date_str
+    matched = BITGET_ARCHIVE_NAME_PATTERN.match(file_name)
+    if not matched:
+        return None
+    raw_date = matched.group(1)
+    return f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+
+
+def get_existing_dates(base_dir: Path, exchange: str, symbol: str) -> set[str]:
+    """获取存储中已经存在的日期集合。"""
+    dates = set()
+    for file_name in list_storage_file_names(base_dir / symbol):
+        if exchange == "bitget":
+            date_str = parse_bitget_date_from_name(file_name)
+        else:
+            if not file_name.endswith(".csv.gz"):
+                continue
+            date_str = file_name.removesuffix(".csv.gz")[-10:]
+        if date_str and re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+            dates.add(date_str)
+    return dates
+
+
 def get_latest_local_date(base_dir: Path, symbol: str) -> str | None:
     """获取本地最新日期。"""
     symbol_dir = base_dir / symbol
@@ -203,6 +237,10 @@ def get_latest_bitget_local_date(base_dir: Path, symbol: str) -> str | None:
     if not symbol_dir.exists():
         return None
     dates = []
+    for path in symbol_dir.glob(f"{symbol}_*.csv.gz"):
+        date_str = path.name.removesuffix(".csv.gz")[-10:]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+            dates.append(date_str)
     for path in symbol_dir.glob("*.zip"):
         matched = BITGET_ARCHIVE_NAME_PATTERN.match(path.name)
         if not matched:
@@ -220,6 +258,10 @@ def count_local_synced_days(base_dir: Path, exchange: str, symbol: str) -> int:
         return 0
     if exchange == "bitget":
         dates = set()
+        for path in symbol_dir.glob(f"{symbol}_*.csv.gz"):
+            date_str = path.name.removesuffix(".csv.gz")[-10:]
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+                dates.add(date_str)
         for path in symbol_dir.glob("*.zip"):
             matched = BITGET_ARCHIVE_NAME_PATTERN.match(path.name)
             if not matched:
@@ -278,6 +320,22 @@ def write_daily_rows(base_dir: Path, symbol: str, rows_by_date: dict) -> int:
             continue
         total += write_gzip_csv_rows(output_path, NORMALIZED_TRADE_FIELDS, rows, False)
     return total
+
+
+def append_rows_to_temp_file(file_path: Path, rows: list[dict]) -> int:
+    """向临时压缩成交文件追加标准化记录。"""
+    if not rows:
+        return 0
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not file_path.exists()
+    mode = "at" if file_path.exists() else "wt"
+    with gzip.open(file_path, mode, encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=NORMALIZED_TRADE_FIELDS)
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return len(rows)
 
 
 def split_binance_zip(content: bytes, symbol: str, base_dir: Path) -> int:
@@ -339,16 +397,18 @@ def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str
 def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path) -> bool:
     """下载Bitget单日现货成交分片。"""
     failure_key = f"bitget:{symbol}:{date_str}"
-    output_dir = base_dir / symbol
-    output_dir.mkdir(parents=True, exist_ok=True)
-    has_content = False
+    output_path = build_output_path(base_dir, symbol, date_str)
+    if output_path.exists():
+        clear_failure(fail_path, failure_key)
+        return True
+    tmp_path = output_path.with_name(output_path.name + ".part")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    shard_count = 0
+    row_count = 0
     for index in range(1, BITGET_MAX_FILE_INDEX + 1):
         shard_tag = f"{index:03d}"
         shard_name = f"{date_str.replace('-', '')}_{shard_tag}.zip"
-        output_path = build_bitget_output_path(base_dir, symbol, shard_name)
-        if output_path.exists():
-            has_content = True
-            continue
         url = f"{BITGET_SPOT_BASE_URL}/{symbol}/{shard_name}"
         try:
             content = download_bitget_bytes(url)
@@ -356,42 +416,56 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
             append_failure(fail_path, failure_key, "bitget", symbol, url, str(exc))
             return False
         if content is None:
-            if not has_content:
+            if shard_count == 0:
                 clear_failure(fail_path, failure_key)
                 return False
+            if row_count == 0:
+                clear_failure(fail_path, failure_key)
+                return False
+            replace_output_file(tmp_path, output_path)
             clear_failure(fail_path, failure_key)
-            log(f"bitget {symbol} {date_str} 已保留原始分片数: {index - 1}")
+            log(f"bitget {symbol} {date_str} 已写入记录数: {row_count}")
             return True
-        tmp_path = output_path.with_name(output_path.name + ".part")
-        if tmp_path.exists():
-            tmp_path.unlink()
-        tmp_path.write_bytes(content)
-        replace_output_file(tmp_path, output_path)
-        has_content = True
+        rows = []
+        with zipfile.ZipFile(BytesIO(content), "r") as zf:
+            name = zf.namelist()[0]
+            with zf.open(name) as f:
+                reader = csv.DictReader(TextIOWrapper(f, encoding="utf-8", newline=""))
+                for row in reader:
+                    normalized = normalize_bitget_trade_row(symbol, row)
+                    if normalized:
+                        rows.append(normalized[1])
+        row_count += append_rows_to_temp_file(tmp_path, rows)
+        shard_count += 1
         time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
-    if has_content:
-        log(f"bitget {symbol} {date_str} 达到分片上限 {BITGET_MAX_FILE_INDEX}，请检查是否仍有后续分片")
+    if row_count > 0:
+        replace_output_file(tmp_path, output_path)
+        log(f"bitget {symbol} {date_str} 已写入记录数: {row_count}")
         clear_failure(fail_path, failure_key)
         return True
     clear_failure(fail_path, failure_key)
     return False
 
 
-def sync_binance_month(symbol: str, start_day: str, end_day: str, fail_path: Path, synced_days: int) -> tuple[int, bool]:
+def sync_binance_month(symbol: str, missing_dates: list[str], fail_path: Path, synced_days: int) -> tuple[int, bool]:
     """同步Binance单月现货成交。"""
     base_dir = cex_config.get_source_dir(DATASET_ID, "binance")
     if not base_dir:
         return synced_days, True
+    if not missing_dates:
+        return synced_days, True
+    start_day = missing_dates[0]
+    end_day = missing_dates[-1]
     month_tag = start_day[:7]
     monthly_file = f"{symbol}-trades-{month_tag}.zip"
     monthly_url = f"{BINANCE_BUCKET_URL}/data/spot/monthly/trades/{symbol}/{monthly_file}"
     month_failure_key = f"binance:{symbol}:month:{month_tag}"
     success = download_binance_archive(base_dir, symbol, monthly_url, month_failure_key, fail_path)
     if success:
-        synced_days += count_days_in_range(start_day, end_day)
+        synced_days += len(missing_dates)
         status_update("binance", symbol, (synced_days, f"月 {month_tag} {monthly_file}"))
         return synced_days, True
-    for date_str in iter_dates(start_day, end_day):
+    for date_str in missing_dates:
         daily_file = f"{symbol}-trades-{date_str}.zip"
         daily_url = f"{BINANCE_BUCKET_URL}/data/spot/daily/trades/{symbol}/{daily_file}"
         if download_binance_archive(base_dir, symbol, daily_url, f"binance:{symbol}:day:{date_str}", fail_path):
@@ -424,11 +498,15 @@ def fetch_okx_download_urls(symbol: str, start_day: str, end_day: str, date_aggr
     return urls
 
 
-def sync_okx_month(symbol: str, start_day: str, end_day: str, fail_path: Path, synced_days: int) -> tuple[int, bool]:
+def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synced_days: int) -> tuple[int, bool]:
     """同步OKX单月现货成交。"""
     base_dir = cex_config.get_source_dir(DATASET_ID, "okx")
     if not base_dir:
         return synced_days, True
+    if not missing_dates:
+        return synced_days, True
+    start_day = missing_dates[0]
+    end_day = missing_dates[-1]
     month_tag = start_day[:7]
     try:
         urls = fetch_okx_download_urls(symbol, start_day, end_day, "monthly")
@@ -440,7 +518,7 @@ def sync_okx_month(symbol: str, start_day: str, end_day: str, fail_path: Path, s
         for url in urls:
             file_name = url.rsplit("/", 1)[-1]
             if download_okx_archive(base_dir, symbol, url, f"okx:{symbol}:month:{month_tag}", fail_path):
-                synced_days += count_days_in_range(start_day, end_day)
+                synced_days += len(missing_dates)
                 status_update("okx", symbol, (synced_days, f"月 {month_tag} {file_name}"))
                 return synced_days, True
     try:
@@ -458,31 +536,31 @@ def sync_okx_month(symbol: str, start_day: str, end_day: str, fail_path: Path, s
     return synced_days, True
 
 
-def sync_bybit_month(symbol: str, start_day: str, end_day: str, fail_path: Path, synced_days: int) -> tuple[int, bool]:
+def sync_bybit_month(symbol: str, missing_dates: list[str], fail_path: Path, synced_days: int) -> tuple[int, bool]:
     """同步Bybit单月现货成交。"""
     base_dir = cex_config.get_source_dir(DATASET_ID, "bybit")
     if not base_dir:
         return synced_days, True
-    for date_str in iter_dates(start_day, end_day):
+    for date_str in missing_dates:
         if download_bybit_day(base_dir, symbol, date_str, fail_path):
             synced_days += 1
         status_update("bybit", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
     return synced_days, True
 
 
-def sync_bitget_month(symbol: str, start_day: str, end_day: str, fail_path: Path, synced_days: int) -> tuple[int, bool]:
+def sync_bitget_month(symbol: str, missing_dates: list[str], fail_path: Path, synced_days: int) -> tuple[int, bool]:
     """同步Bitget单月现货成交。"""
     base_dir = cex_config.get_source_dir(DATASET_ID, "bitget")
     if not base_dir:
         return synced_days, True
-    for date_str in iter_dates(start_day, end_day):
+    for date_str in missing_dates:
         if download_bitget_day(base_dir, symbol, date_str, fail_path):
             synced_days += 1
-        status_update("bitget", symbol, (synced_days, f"日 {date_str} {date_str.replace('-', '')}_001.zip"))
+        status_update("bitget", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
     return synced_days, True
 
 
-def run_exchange(exchange: str, symbols: list, latest_date_getter, month_worker) -> None:
+def run_exchange(exchange: str, symbols: list, month_worker) -> None:
     """按月执行单个交易所同步。"""
     if not cex_config.is_supported(DATASET_ID, exchange):
         for symbol in symbols:
@@ -497,41 +575,50 @@ def run_exchange(exchange: str, symbols: list, latest_date_getter, month_worker)
         return
     state_list = []
     month_anchor_dates = []
+    end_date = end_dt.strftime("%Y-%m-%d")
     for symbol in symbols:
         start_date = cex_config.get_start_date(DATASET_ID, exchange, symbol)
         if not start_date:
             status_update(exchange, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
             continue
-        latest_local = latest_date_getter(base_dir, symbol)
-        synced_days = count_local_synced_days(base_dir, exchange, symbol)
-        next_date = next_sync_date(start_date, latest_local)
-        next_dt = datetime.strptime(next_date, "%Y-%m-%d")
-        if next_dt > end_dt:
-            latest_text = latest_local or end_dt.strftime("%Y-%m-%d")
+        existing_dates = get_existing_dates(base_dir, exchange, symbol)
+        synced_days = count_existing_days(existing_dates, start_date, end_date)
+        synced_until = get_synced_until_date(existing_dates, start_date, end_date)
+        missing_dates = list_missing_dates(existing_dates, start_date, end_date)
+        if not missing_dates:
+            latest_text = synced_until or end_date
             status_update(exchange, symbol, (synced_days, f"日 {latest_text} 已是最新"))
             continue
-        state_list.append({"symbol": symbol, "next_date": next_date, "synced_days": synced_days})
+        next_date = missing_dates[0]
+        if synced_until:
+            status_update(exchange, symbol, (synced_days, f"日 {synced_until} 准备回补"))
+        else:
+            status_update(exchange, symbol, (synced_days, f"准备 {next_date}"))
+        log(f"{exchange} {symbol} 开始回补: {next_date} -> {end_date}")
+        state_list.append({"symbol": symbol, "missing_dates": set(missing_dates), "synced_days": synced_days})
         month_anchor_dates.append(next_date)
     if not state_list:
         return
-    for month_start_day in iter_months(min(month_anchor_dates), end_dt.strftime("%Y-%m-%d")):
-        month_finish_day = min(end_dt.strftime("%Y-%m-%d"), month_end(month_start_day))
-        month_finish_dt = datetime.strptime(month_finish_day, "%Y-%m-%d")
+    for month_start_day in iter_months(min(month_anchor_dates), end_date):
+        month_finish_day = min(end_date, month_end(month_start_day))
         for state in state_list:
-            next_dt = datetime.strptime(state["next_date"], "%Y-%m-%d")
-            if next_dt > month_finish_dt:
+            month_missing_dates = [
+                date_text
+                for date_text in iter_dates(month_start_day, month_finish_day)
+                if date_text in state["missing_dates"]
+            ]
+            if not month_missing_dates:
                 continue
-            actual_start_day = state["next_date"] if state["next_date"] > month_start_day else month_start_day
             state["synced_days"], is_done = month_worker(
                 state["symbol"],
-                actual_start_day,
-                month_finish_day,
+                month_missing_dates,
                 fail_path,
                 state["synced_days"],
             )
             if not is_done:
                 return
-            state["next_date"] = (month_finish_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+            for date_text in month_missing_dates:
+                state["missing_dates"].discard(date_text)
 
 
 def main() -> None:
@@ -540,22 +627,22 @@ def main() -> None:
         threads = [
             threading.Thread(
                 target=run_exchange,
-                args=("bybit", cex_config.get_spot_trade_symbols("bybit"), get_latest_local_date, sync_bybit_month),
+                args=("bybit", cex_config.get_spot_trade_symbols("bybit"), sync_bybit_month),
                 daemon=True,
             ),
             threading.Thread(
                 target=run_exchange,
-                args=("binance", cex_config.get_spot_trade_symbols("binance"), get_latest_local_date, sync_binance_month),
+                args=("binance", cex_config.get_spot_trade_symbols("binance"), sync_binance_month),
                 daemon=True,
             ),
             threading.Thread(
                 target=run_exchange,
-                args=("bitget", cex_config.get_spot_trade_symbols("bitget"), get_latest_bitget_local_date, sync_bitget_month),
+                args=("bitget", cex_config.get_spot_trade_symbols("bitget"), sync_bitget_month),
                 daemon=True,
             ),
             threading.Thread(
                 target=run_exchange,
-                args=("okx", cex_config.get_spot_trade_symbols("okx"), get_latest_local_date, sync_okx_month),
+                args=("okx", cex_config.get_spot_trade_symbols("okx"), sync_okx_month),
                 daemon=True,
             ),
         ]

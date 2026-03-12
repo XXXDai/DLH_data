@@ -11,8 +11,13 @@ from urllib.request import Request, urlopen
 import app_config
 from cex import cex_config
 from cex.cex_common import iter_dates
+from cex.cex_common import count_existing_days
+from cex.cex_common import get_synced_until_date
 from cex.cex_common import load_failures
+from cex.cex_common import list_missing_dates
+from cex.cex_common import list_storage_file_names
 from cex.cex_common import seconds_until_next_utc_4h
+from cex.cex_common import storage_file_exists
 from cex.cex_common import update_failure_file
 from cex.cex_common import build_part_path
 from cex.cex_common import cleanup_stale_part_file
@@ -211,6 +216,16 @@ def get_latest_local_date(base_dir: Path, exchange: str, market: str, symbol: st
     return max(dates) if dates else None
 
 
+def get_existing_dates(base_dir: Path, exchange: str, market: str, symbol: str) -> set[str]:
+    """获取存储中已经存在的订单簿日期集合。"""
+    dates = set()
+    for file_name in list_storage_file_names(base_dir / symbol):
+        date_text = parse_date_from_name(exchange, market, file_name, symbol)
+        if date_text:
+            dates.add(date_text)
+    return dates
+
+
 def record_failure(exchange: str, market: str, symbol: str, date_str: str, message: str) -> None:
     """记录单个日期的失败信息。"""
     update_failure_file(
@@ -345,7 +360,7 @@ def download_date(exchange: str, market: str, symbol: str, date_str: str) -> boo
         return False
     output_path = build_output_path(exchange, market, base_dir, symbol, date_str)
     cleanup_stale_part_file(output_path)
-    if output_path.exists() and is_valid_archive(output_path):
+    if storage_file_exists(output_path) and (not output_path.exists() or is_valid_archive(output_path)):
         clear_failure(exchange, market, symbol, date_str)
         return True
     url = build_url(exchange, market, symbol, date_str)
@@ -379,7 +394,12 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
     if not base_dir or not start_date:
         status_update(exchange, market, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    end_date = end_dt.strftime("%Y-%m-%d")
+    existing_dates = get_existing_dates(base_dir, exchange, market, symbol)
     done_count = 0
+    if end_dt >= datetime.strptime(start_date, "%Y-%m-%d"):
+        done_count = count_existing_days(existing_dates, start_date, end_date)
     failures = iter_symbol_failures(exchange, market, symbol)
     for record in failures:
         date_str = str(record.get("目标") or "")
@@ -389,21 +409,22 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         status_update(exchange, market, symbol, (done_count, f"重试 {date_str} {file_name}"))
         if download_date(exchange, market, symbol, date_str):
             done_count += 1
-    latest_local = get_latest_local_date(base_dir, exchange, market, symbol)
-    start_dt = datetime.strptime(latest_local or start_date, "%Y-%m-%d")
-    if latest_local:
-        start_dt += timedelta(days=1)
-    end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
-    if start_dt > end_dt:
-        status_update(exchange, market, symbol, (done_count, f"日 {latest_local or end_dt.strftime('%Y-%m-%d')} 已是最新"))
+            existing_dates.add(date_str)
+    if end_dt < datetime.strptime(start_date, "%Y-%m-%d"):
+        status_update(exchange, market, symbol, (done_count, f"日 {start_date} 已是最新"))
         return
-    date_list = list(iter_dates(start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")))
+    date_list = list_missing_dates(existing_dates, start_date, end_date)
+    if not date_list:
+        synced_until = get_synced_until_date(existing_dates, start_date, end_date) or end_date
+        status_update(exchange, market, symbol, (done_count, f"日 {synced_until} 已是最新"))
+        return
     total = len(date_list)
     for index, date_str in enumerate(date_list, 1):
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} {file_name}"))
         if download_date(exchange, market, symbol, date_str):
             done_count += 1
+            existing_dates.add(date_str)
             status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} {file_name}"))
 
 

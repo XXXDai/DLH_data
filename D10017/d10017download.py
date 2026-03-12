@@ -12,6 +12,7 @@ from urllib.request import urlopen
 
 import app_config
 from cex import cex_config
+from cex.cex_common import download_file_from_storage
 from cex.cex_common import download_bytes
 from cex.cex_common import upload_file_to_s3
 from cex.cex_common import seconds_until_next_utc_midnight
@@ -63,8 +64,17 @@ def utc_date_str(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def latest_date_from_timestamps(timestamps: set[int]) -> str:
+    """从时间戳集合中提取最新日期。"""
+    if not timestamps:
+        return ""
+    return utc_date_str(max(timestamps))
+
+
 def load_existing_timestamps(file_path: Path) -> set:
     """加载已有时间戳集合。"""
+    if not file_path.exists():
+        download_file_from_storage(file_path)
     if not file_path.exists():
         return set()
     timestamps = set()
@@ -332,10 +342,15 @@ def run_symbol(exchange: str, symbol: str) -> None:
         return
     file_path = build_file_path(base_dir, symbol)
     existing_ts = load_existing_timestamps(file_path)
-    status_update(exchange, "future", symbol, (len(existing_ts), "同步中"))
+    latest_existing_date = latest_date_from_timestamps(existing_ts)
+    if latest_existing_date:
+        status_update(exchange, "future", symbol, (len(existing_ts), f"日 {latest_existing_date} 准备同步"))
+    else:
+        status_update(exchange, "future", symbol, (len(existing_ts), f"准备 {start_date}"))
     rows = build_rows(exchange, symbol, start_date, existing_ts)
     count = write_rows(file_path, rows)
-    status_update(exchange, "future", symbol, (len(existing_ts) + count, "已完成"))
+    latest_synced_date = rows[-1]["date"] if rows else latest_existing_date or start_date
+    status_update(exchange, "future", symbol, (len(existing_ts) + count, f"日 {latest_synced_date} 已完成"))
     log(f"{exchange} {symbol} 已写入记录数: {count}")
 
 

@@ -15,8 +15,11 @@ from sortedcontainers import SortedDict
 from cex import cex_config
 from cex.cex_common import build_part_path
 from cex.cex_common import cleanup_stale_part_file
+from cex.cex_common import download_file_from_storage
+from cex.cex_common import list_storage_file_names
 from cex.cex_common import replace_output_file
 from cex.cex_common import seconds_until_next_utc_midnight
+from cex.cex_common import storage_file_exists
 
 
 BYBIT_DEPTH = 200  # Bybit历史订单簿深度，档位
@@ -317,7 +320,7 @@ def is_valid_archive(file_path: Path) -> bool:
 def process_date(input_dataset_id: str, exchange: str, input_dir: Path, output_dir: Path, symbol: str, date_str: str) -> None:
     """处理单日订单簿归档。"""
     input_path = build_input_path(input_dataset_id, exchange, input_dir, symbol, date_str)
-    if not input_path.exists():
+    if not input_path.exists() and not download_file_from_storage(input_path):
         return
     if not is_valid_archive(input_path):
         log(f"文件不是有效压缩包: {input_path}")
@@ -325,7 +328,7 @@ def process_date(input_dataset_id: str, exchange: str, input_dir: Path, output_d
         return
     output_path = build_output_path(input_dataset_id, exchange, output_dir, symbol, date_str)
     cleanup_stale_part_file(output_path)
-    if output_path.exists():
+    if storage_file_exists(output_path):
         return
     tmp_output_path = build_part_path(output_path)
     if tmp_output_path.exists():
@@ -394,20 +397,9 @@ def parse_date_from_name(input_dataset_id: str, exchange: str, file_name: str, s
 
 def iter_available_dates(input_dataset_id: str, exchange: str, input_dir: Path, symbol: str, start_date: str) -> list[str]:
     """遍历某个交易对可处理的日期。"""
-    symbol_dir = input_dir / symbol
-    if not symbol_dir.exists():
-        return []
     dates = set()
-    if exchange == "bybit":
-        pattern = f"*_ob{BYBIT_DEPTH}.data.zip"
-    elif exchange == "binance":
-        pattern = "*-bookTicker-*.zip"
-    elif exchange == "bitget":
-        pattern = "*.zip"
-    else:
-        pattern = f"*-L2orderbook-{okx_orderbook_level_for_dataset(input_dataset_id)}-*.tar.gz"
-    for file_path in symbol_dir.glob(pattern):
-        date_text = parse_date_from_name(input_dataset_id, exchange, file_path.name, symbol)
+    for file_name in list_storage_file_names(input_dir / symbol):
+        date_text = parse_date_from_name(input_dataset_id, exchange, file_name, symbol)
         if date_text and date_text >= start_date:
             dates.add(date_text)
     return sorted(dates)

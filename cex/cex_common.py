@@ -153,6 +153,142 @@ def build_s3_key(file_path: Path) -> str | None:
     return f"{app_config.S3_PREFIX}/{relative_path.as_posix()}"
 
 
+def build_s3_prefix(dir_path: Path) -> str | None:
+    """构造本地目录对应的S3前缀。"""
+    absolute_path = dir_path.resolve()
+    data_root = cex_config.DATA_DYLAN_ROOT.resolve()
+    try:
+        relative_path = absolute_path.relative_to(data_root)
+    except ValueError:
+        return None
+    prefix = f"{app_config.S3_PREFIX}/{relative_path.as_posix().rstrip('/')}"
+    return prefix + "/"
+
+
+def list_s3_file_names(dir_path: Path) -> list[str]:
+    """列出S3目录下的直接子文件名。"""
+    prefix = build_s3_prefix(dir_path)
+    if not prefix:
+        return []
+    try:
+        paginator = get_s3_client().get_paginator("list_objects_v2")
+        names = set()
+        for page in paginator.paginate(Bucket=app_config.S3_BUCKET_NAME, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key") or "")
+                if not key.startswith(prefix) or key.endswith("/"):
+                    continue
+                suffix = key[len(prefix) :]
+                if "/" in suffix:
+                    continue
+                names.add(suffix)
+        return sorted(names)
+    except NoCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 缺少凭证") from exc
+    except PartialCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 凭证不完整") from exc
+    except ConnectTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 连接超时") from exc
+    except ReadTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 读取超时") from exc
+    except EndpointConnectionError as exc:
+        raise RuntimeError("S3检查失败: 无法连接S3端点") from exc
+    except ClientError as exc:
+        raise RuntimeError(f"S3检查失败: {exc.response.get('Error', {}).get('Code', '未知错误')}") from exc
+
+
+def list_storage_file_names(dir_path: Path) -> list[str]:
+    """按当前存储模式列出目录下的直接子文件名。"""
+    if not is_s3_storage_mode():
+        if not dir_path.exists():
+            return []
+        return sorted([path.name for path in dir_path.iterdir() if path.is_file()])
+    return list_s3_file_names(dir_path)
+
+
+def storage_file_exists(file_path: Path) -> bool:
+    """按当前存储模式判断文件是否存在。"""
+    if file_path.exists():
+        return True
+    if not is_s3_storage_mode():
+        return False
+    s3_key = build_s3_key(file_path)
+    if not s3_key:
+        return False
+    try:
+        get_s3_client().head_object(Bucket=app_config.S3_BUCKET_NAME, Key=s3_key)
+        return True
+    except NoCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 缺少凭证") from exc
+    except PartialCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 凭证不完整") from exc
+    except ConnectTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 连接超时") from exc
+    except ReadTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 读取超时") from exc
+    except EndpointConnectionError as exc:
+        raise RuntimeError("S3检查失败: 无法连接S3端点") from exc
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise RuntimeError(f"S3检查失败: {code or '未知错误'}") from exc
+
+
+def download_file_from_storage(file_path: Path) -> bool:
+    """按当前存储模式恢复单个文件到本地。"""
+    if file_path.exists():
+        return True
+    if not is_s3_storage_mode():
+        return False
+    s3_key = build_s3_key(file_path)
+    if not s3_key:
+        return False
+    ensure_parent(file_path)
+    tmp_path = build_part_path(file_path)
+    if tmp_path.exists():
+        tmp_path.unlink()
+    try:
+        get_s3_client().download_file(app_config.S3_BUCKET_NAME, s3_key, str(tmp_path))
+    except NoCredentialsError as exc:
+        raise RuntimeError("S3下载失败: 缺少凭证") from exc
+    except PartialCredentialsError as exc:
+        raise RuntimeError("S3下载失败: 凭证不完整") from exc
+    except ConnectTimeoutError as exc:
+        raise RuntimeError("S3下载失败: 连接超时") from exc
+    except ReadTimeoutError as exc:
+        raise RuntimeError("S3下载失败: 读取超时") from exc
+    except EndpointConnectionError as exc:
+        raise RuntimeError("S3下载失败: 无法连接S3端点") from exc
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise RuntimeError(f"S3下载失败: {code or '未知错误'}") from exc
+    tmp_path.replace(file_path)
+    return True
+
+
+def count_existing_days(existing_dates: set[str], start_date: str, end_date: str) -> int:
+    """统计区间内已存在的自然日数量。"""
+    return sum(1 for date_text in iter_dates(start_date, end_date) if date_text in existing_dates)
+
+
+def list_missing_dates(existing_dates: set[str], start_date: str, end_date: str) -> list[str]:
+    """列出区间内缺失的自然日。"""
+    return [date_text for date_text in iter_dates(start_date, end_date) if date_text not in existing_dates]
+
+
+def get_synced_until_date(existing_dates: set[str], start_date: str, end_date: str) -> str:
+    """返回从起始日连续同步到的最新日期。"""
+    latest_text = ""
+    for date_text in iter_dates(start_date, end_date):
+        if date_text not in existing_dates:
+            break
+        latest_text = date_text
+    return latest_text
+
+
 def upload_file_to_s3(file_path: Path) -> None:
     """上传单个本地文件到S3。"""
     if not is_s3_storage_mode():

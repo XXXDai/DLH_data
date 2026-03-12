@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 import app_config
 from cex import cex_config
+from cex.cex_common import download_file_from_storage
 from cex.cex_common import seconds_until_next_utc_midnight
 from cex.cex_common import upload_file_to_s3
 
@@ -111,6 +112,24 @@ def append_rows(file_path: Path, rows: list) -> int:
             writer.writerow(row)
     upload_file_to_s3(file_path)
     return len(rows)
+
+
+def load_existing_sync_info(file_path: Path) -> tuple[int, str]:
+    """读取现有记录数量与最新采集日期。"""
+    if not file_path.exists():
+        download_file_from_storage(file_path)
+    if not file_path.exists():
+        return 0, ""
+    count = 0
+    latest_date = ""
+    with file_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            count += 1
+            collect_date = str(row.get("collect_date") or "")
+            if collect_date > latest_date:
+                latest_date = collect_date
+    return count, latest_date
 
 
 def build_binance_signed_url(current: int) -> str:
@@ -339,8 +358,15 @@ def run_bybit() -> None:
     rows_by_coin = fetch_bybit_rows()
     for coin in cex_config.get_earn_coins("bybit"):
         rows = rows_by_coin.get(coin, [])
-        count = append_rows(build_file_path(base_dir, coin), rows)
-        status_update("bybit", "earn", coin, count)
+        file_path = build_file_path(base_dir, coin)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update("bybit", "earn", coin, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update("bybit", "earn", coin, (existing_count, "准备同步"))
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update("bybit", "earn", coin, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"bybit {coin} 已写入记录数: {count}")
 
 
@@ -355,8 +381,15 @@ def run_binance() -> None:
     rows_by_coin = fetch_binance_rows()
     for coin in cex_config.get_earn_coins(exchange):
         rows = rows_by_coin.get(coin, [])
-        count = append_rows(build_file_path(base_dir, coin), rows)
-        status_update(exchange, "earn", coin, count)
+        file_path = build_file_path(base_dir, coin)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update(exchange, "earn", coin, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update(exchange, "earn", coin, (existing_count, "准备同步"))
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update(exchange, "earn", coin, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"{exchange} {coin} 已写入记录数: {count}")
 
 
@@ -371,8 +404,15 @@ def run_bitget() -> None:
     rows_by_coin = fetch_bitget_rows()
     for coin in cex_config.get_earn_coins(exchange):
         rows = rows_by_coin.get(coin, [])
-        count = append_rows(build_file_path(base_dir, coin), rows)
-        status_update(exchange, "earn", coin, count)
+        file_path = build_file_path(base_dir, coin)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update(exchange, "earn", coin, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update(exchange, "earn", coin, (existing_count, "准备同步"))
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update(exchange, "earn", coin, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"{exchange} {coin} 已写入记录数: {count}")
 
 
@@ -387,8 +427,15 @@ def run_okx() -> None:
     rows_by_coin = fetch_okx_rows()
     for coin in cex_config.get_earn_coins(exchange):
         rows = rows_by_coin.get(coin, [])
-        count = append_rows(build_file_path(base_dir, coin), rows)
-        status_update(exchange, "earn", coin, count)
+        file_path = build_file_path(base_dir, coin)
+        existing_count, latest_date = load_existing_sync_info(file_path)
+        if latest_date:
+            status_update(exchange, "earn", coin, (existing_count, f"日 {latest_date} 准备同步"))
+        else:
+            status_update(exchange, "earn", coin, (existing_count, "准备同步"))
+        count = append_rows(file_path, rows)
+        synced_date = rows[0].get("collect_date", "") if rows else latest_date
+        status_update(exchange, "earn", coin, (existing_count + count, f"日 {synced_date} 已完成"))
         log(f"{exchange} {coin} 已写入记录数: {count}")
 
 
