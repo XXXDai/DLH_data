@@ -21,6 +21,7 @@ from botocore.exceptions import EndpointConnectionError
 from botocore.exceptions import NoCredentialsError
 from botocore.exceptions import PartialCredentialsError
 from botocore.exceptions import ReadTimeoutError
+from boto3.s3.transfer import TransferConfig
 
 import app_config
 from cex import cex_config
@@ -139,7 +140,19 @@ def get_s3_client():
             connect_timeout=app_config.S3_CONNECT_TIMEOUT_SECONDS,
             read_timeout=app_config.S3_READ_TIMEOUT_SECONDS,
             retries={"max_attempts": app_config.S3_MAX_ATTEMPTS, "mode": "standard"},
+            max_pool_connections=app_config.S3_MAX_POOL_CONNECTIONS,
         ),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_s3_transfer_config() -> TransferConfig:
+    """构造S3传输配置。"""
+    return TransferConfig(
+        multipart_threshold=app_config.S3_MULTIPART_THRESHOLD_BYTES,
+        max_concurrency=app_config.S3_UPLOAD_MAX_CONCURRENCY,
+        multipart_chunksize=app_config.S3_MULTIPART_CHUNKSIZE_BYTES,
+        use_threads=app_config.S3_USE_THREADS,
     )
 
 
@@ -250,7 +263,12 @@ def download_file_from_storage(file_path: Path) -> bool:
     if tmp_path.exists():
         tmp_path.unlink()
     try:
-        get_s3_client().download_file(app_config.S3_BUCKET_NAME, s3_key, str(tmp_path))
+        get_s3_client().download_file(
+            app_config.S3_BUCKET_NAME,
+            s3_key,
+            str(tmp_path),
+            Config=get_s3_transfer_config(),
+        )
     except NoCredentialsError as exc:
         raise RuntimeError("S3下载失败: 缺少凭证") from exc
     except PartialCredentialsError as exc:
@@ -303,7 +321,12 @@ def upload_file_to_s3(file_path: Path) -> None:
     if not s3_key:
         return
     try:
-        get_s3_client().upload_file(str(file_path), app_config.S3_BUCKET_NAME, s3_key)
+        get_s3_client().upload_file(
+            str(file_path),
+            app_config.S3_BUCKET_NAME,
+            s3_key,
+            Config=get_s3_transfer_config(),
+        )
     except NoCredentialsError as exc:
         raise RuntimeError("S3上传失败: 缺少凭证") from exc
     except PartialCredentialsError as exc:

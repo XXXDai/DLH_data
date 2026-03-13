@@ -275,25 +275,41 @@ def draw_rule(stdscr, row: int, col: int, width: int) -> None:
     stdscr.hline(row, col, curses.ACS_HLINE, width)
 
 
-def parse_download_status(text: str) -> tuple[str, str, str]:
-    """解析下载状态文本。"""
+def parse_download_status(text: str) -> tuple[str, str, str, str]:
+    """解析历史下载状态文本。"""
     text = (text or "").strip()
     if not text:
-        return "-", "-", "-"
+        return "-", "-", "-", "-"
     parts = text.split()
     if len(parts) >= 2 and parts[0] in {"失败", "无文件"}:
-        return parts[0], parts[1], "-"
+        detail_text = "请求失败" if parts[0] == "失败" else "当日无归档"
+        return parts[0], parts[1], detail_text, "-"
+    if len(parts) >= 3 and parts[0] in {"月", "日"} and parts[2] == "请求中":
+        detail_text = "月包请求" if parts[0] == "月" else "日包请求"
+        return "处理中", parts[1], detail_text, "-"
+    if len(parts) >= 3 and parts[0] in {"月", "日"} and parts[2] == "准备回补":
+        return "准备回补", parts[1], "本地已有进度", parts[1]
+    if len(parts) >= 3 and parts[0] in {"月", "日"} and parts[2] == "已是最新":
+        return "等待新文件", parts[1], "当前已是最新", parts[1]
     if len(parts) >= 3 and "/" in parts[0] and len(parts[1]) == 10:
-        return parts[0], parts[1], parts[2]
+        if parts[2] == "请求中":
+            return "处理中", parts[1], parts[0], "-"
+        detail_text = parts[0]
+        if len(parts) >= 3:
+            detail_text = f"{parts[0]} {' '.join(parts[2:])}"
+        return "完成日期", parts[1], detail_text, parts[1]
     if len(parts) >= 3 and parts[0] in {"重试", "今日"}:
-        return parts[0], parts[1], parts[2]
+        return parts[0], parts[1], " ".join(parts[2:]), "-"
     if len(parts) >= 3 and parts[0] in {"月", "日"}:
-        return parts[0], parts[1], parts[2]
+        stage_text = "完成月份" if parts[0] == "月" else "完成日期"
+        return stage_text, parts[1], " ".join(parts[2:]), parts[1]
+    if len(parts) >= 2 and parts[0] == "准备":
+        return "准备扫描", parts[1], "首个缺口", "-"
     if len(parts) >= 2 and parts[0] == "对齐等待":
-        return "对齐", "-", parts[1]
+        return "等待对齐", parts[1], "-", "-"
     if text == "已对齐":
-        return "对齐", "-", "-"
-    return "-", "-", truncate_by_cells(text, 60)
+        return "已对齐", "-", "-", "-"
+    return "-", "-", truncate_by_cells(text, 60), "-"
 
 
 def group_tasks_by_exchange(tasks: list) -> tuple[list[str], dict]:
@@ -368,15 +384,11 @@ def get_synced_until_text(task_id: str, bucket: dict) -> str:
     for value in bucket.values():
         if not (isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float))):
             continue
-        progress_text, date_text, file_name = parse_download_status(str(value[1]))
-        if date_text == "-":
+        _stage_text, _current_text, _detail_text, sync_text = parse_download_status(str(value[1]))
+        if sync_text == "-":
             continue
-        if progress_text in {"失败", "无文件"}:
-            continue
-        if file_name in {"请求中", "无文件"}:
-            continue
-        if sync_text_sort_key(date_text) >= sync_text_sort_key(latest_text):
-            latest_text = date_text
+        if sync_text_sort_key(sync_text) >= sync_text_sort_key(latest_text):
+            latest_text = sync_text
     return latest_text or "-"
 
 
@@ -767,8 +779,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                         and len(value) >= 2
                         and isinstance(value[0], (int, float))
                     ):
-                        progress, date_text, file_name = parse_download_status(str(value[1]))
-                        status_items.append((key, display_key, (int(value[0]), progress, date_text, file_name), None))
+                        stage_text, current_text, detail_text, _sync_text = parse_download_status(str(value[1]))
+                        status_items.append((key, display_key, (int(value[0]), stage_text, current_text, detail_text), None))
                         continue
                     if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
                         line_text = f"{display_key}: {value[0]} {value[1]}"
@@ -788,7 +800,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 total = len(status_items)
                 status_header = None
                 if current.task_id in {"D10001", "D10005", "D10013", "D10014"}:
-                    status_header = ("对象", "已同步天数", "进度", "日期", "文件名")
+                    status_header = ("对象", "已同步天数", "阶段", "当前", "说明")
                 header_rows = 1 if status_header else 0
                 max_status_rows = max(0, min(total, max(4, detail_height // 2)))
                 status_height = min(total, max(0, max_status_rows - header_rows))
@@ -814,14 +826,14 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     for _raw_key, display_key, record, _alive in items_for_width:
                         if not isinstance(record, tuple) or len(record) != 4:
                             continue
-                        done_count, progress, _date_text, _file_name = record
+                        done_count, stage_text, _current_text, _detail_text = record
                         max_symbol_cells = max(max_symbol_cells, sum(cell_width(ch) for ch in str(display_key)))
                         max_done_cells = max(max_done_cells, sum(cell_width(ch) for ch in str(done_count)))
-                        max_progress_cells = max(max_progress_cells, sum(cell_width(ch) for ch in str(progress)))
+                        max_progress_cells = max(max_progress_cells, sum(cell_width(ch) for ch in str(stage_text)))
                     symbol_cells = min(max(6, max_symbol_cells), 20)
                     done_cells = max(2, max_done_cells)
-                    progress_cells = min(max(2, max_progress_cells), 8)
-                    date_cells = 10
+                    progress_cells = min(max(4, max_progress_cells), 10)
+                    date_cells = 17
                     reserved_cells = symbol_cells + 1 + done_cells + 1 + progress_cells + 1 + date_cells + 1
                     file_cells = max(0, available - 2 - reserved_cells)
                     header_text = (
@@ -848,7 +860,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                         break
                     key, display_key, line_text, alive = status_items[item_index]
                     if isinstance(line_text, tuple) and len(line_text) == 4:
-                        done_count, progress, date_text, file_name = line_text
+                        done_count, stage_text, current_text, detail_text = line_text
                         prefix = "> " if item_index == status_selected_index else "  "
                         row_text = (
                             prefix
@@ -856,11 +868,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                             + " "
                             + pad_to_cells(str(done_count), done_cells)
                             + " "
-                            + pad_to_cells(str(progress), progress_cells)
+                            + pad_to_cells(str(stage_text), progress_cells)
                             + " "
-                            + pad_to_cells(str(date_text), date_cells)
+                            + pad_to_cells(str(current_text), date_cells)
                             + " "
-                            + truncate_by_cells(str(file_name), file_cells)
+                            + truncate_by_cells(str(detail_text), file_cells)
                         )
                         draw_clipped_text(
                             stdscr,
