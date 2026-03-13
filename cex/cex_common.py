@@ -16,6 +16,7 @@ from urllib.request import urlopen
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from botocore.exceptions import ConnectionClosedError
 from botocore.exceptions import ConnectTimeoutError
 from botocore.exceptions import EndpointConnectionError
 from botocore.exceptions import NoCredentialsError
@@ -167,6 +168,27 @@ def build_s3_key(file_path: Path) -> str | None:
     return f"{app_config.S3_PREFIX}/{relative_path.as_posix()}"
 
 
+def is_retryable_s3_transfer_error(exc: BaseException) -> bool:
+    """判断是否为可重试的S3传输异常。"""
+    return isinstance(exc, (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError, ConnectionClosedError))
+
+
+def maybe_sleep_for_s3_retry(attempt: int) -> None:
+    """在下一次S3重试前等待。"""
+    if attempt < app_config.S3_TRANSFER_RETRY_TIMES:
+        time.sleep(app_config.S3_TRANSFER_RETRY_INTERVAL_SECONDS)
+
+
+def log_s3_transfer_retry(action: str, file_path: Path, attempt: int, exc: BaseException) -> None:
+    """输出S3传输重试日志。"""
+    print(f"S3{action}重试 {attempt}/{app_config.S3_TRANSFER_RETRY_TIMES}: {file_path} | {exc}")
+
+
+def log_s3_transfer_give_up(action: str, file_path: Path, exc: BaseException) -> None:
+    """输出S3传输放弃日志。"""
+    print(f"S3{action}失败，已保留本地文件稍后重试: {file_path} | {exc}")
+
+
 def build_s3_prefix(dir_path: Path) -> str | None:
     """构造本地目录对应的S3前缀。"""
     absolute_path = dir_path.resolve()
@@ -262,28 +284,32 @@ def download_file_from_storage(file_path: Path) -> bool:
     tmp_path = build_part_path(file_path)
     if tmp_path.exists():
         tmp_path.unlink()
-    try:
-        get_s3_client().download_file(
-            app_config.S3_BUCKET_NAME,
-            s3_key,
-            str(tmp_path),
-            Config=get_s3_transfer_config(),
-        )
-    except NoCredentialsError as exc:
-        raise RuntimeError("S3下载失败: 缺少凭证") from exc
-    except PartialCredentialsError as exc:
-        raise RuntimeError("S3下载失败: 凭证不完整") from exc
-    except ConnectTimeoutError as exc:
-        raise RuntimeError("S3下载失败: 连接超时") from exc
-    except ReadTimeoutError as exc:
-        raise RuntimeError("S3下载失败: 读取超时") from exc
-    except EndpointConnectionError as exc:
-        raise RuntimeError("S3下载失败: 无法连接S3端点") from exc
-    except ClientError as exc:
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-        if code in {"404", "NoSuchKey", "NotFound"}:
-            return False
-        raise RuntimeError(f"S3下载失败: {code or '未知错误'}") from exc
+    for attempt in range(1, app_config.S3_TRANSFER_RETRY_TIMES + 1):
+        try:
+            get_s3_client().download_file(
+                app_config.S3_BUCKET_NAME,
+                s3_key,
+                str(tmp_path),
+                Config=get_s3_transfer_config(),
+            )
+            break
+        except NoCredentialsError as exc:
+            raise RuntimeError("S3下载失败: 缺少凭证") from exc
+        except PartialCredentialsError as exc:
+            raise RuntimeError("S3下载失败: 凭证不完整") from exc
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                return False
+            raise RuntimeError(f"S3下载失败: {code or '未知错误'}") from exc
+        except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError, ConnectionClosedError) as exc:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            if attempt >= app_config.S3_TRANSFER_RETRY_TIMES:
+                log_s3_transfer_give_up("下载", file_path, exc)
+                return False
+            log_s3_transfer_retry("下载", file_path, attempt, exc)
+            maybe_sleep_for_s3_retry(attempt)
     if file_path.name.endswith(".csv.gz") and not is_valid_gzip_file(tmp_path):
         tmp_path.unlink()
         return False
@@ -320,25 +346,27 @@ def upload_file_to_s3(file_path: Path) -> None:
     s3_key = build_s3_key(file_path)
     if not s3_key:
         return
-    try:
-        get_s3_client().upload_file(
-            str(file_path),
-            app_config.S3_BUCKET_NAME,
-            s3_key,
-            Config=get_s3_transfer_config(),
-        )
-    except NoCredentialsError as exc:
-        raise RuntimeError("S3上传失败: 缺少凭证") from exc
-    except PartialCredentialsError as exc:
-        raise RuntimeError("S3上传失败: 凭证不完整") from exc
-    except ConnectTimeoutError as exc:
-        raise RuntimeError("S3上传失败: 连接超时") from exc
-    except ReadTimeoutError as exc:
-        raise RuntimeError("S3上传失败: 读取超时") from exc
-    except EndpointConnectionError as exc:
-        raise RuntimeError("S3上传失败: 无法连接S3端点") from exc
-    except ClientError as exc:
-        raise RuntimeError(f"S3上传失败: {exc.response.get('Error', {}).get('Code', '未知错误')}") from exc
+    for attempt in range(1, app_config.S3_TRANSFER_RETRY_TIMES + 1):
+        try:
+            get_s3_client().upload_file(
+                str(file_path),
+                app_config.S3_BUCKET_NAME,
+                s3_key,
+                Config=get_s3_transfer_config(),
+            )
+            return
+        except NoCredentialsError as exc:
+            raise RuntimeError("S3上传失败: 缺少凭证") from exc
+        except PartialCredentialsError as exc:
+            raise RuntimeError("S3上传失败: 凭证不完整") from exc
+        except ClientError as exc:
+            raise RuntimeError(f"S3上传失败: {exc.response.get('Error', {}).get('Code', '未知错误')}") from exc
+        except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError, ConnectionClosedError) as exc:
+            if attempt >= app_config.S3_TRANSFER_RETRY_TIMES:
+                log_s3_transfer_give_up("上传", file_path, exc)
+                return
+            log_s3_transfer_retry("上传", file_path, attempt, exc)
+            maybe_sleep_for_s3_retry(attempt)
 
 
 def replace_output_file(tmp_path: Path, output_path: Path) -> None:
