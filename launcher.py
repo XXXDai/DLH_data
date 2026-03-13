@@ -442,6 +442,7 @@ def filter_tasks(tasks: list, selected: list) -> list:
 
 class ThreadLogWriter:
     def __init__(self, thread_task_map: dict, logs: dict, pending: dict, status_times: dict, error_logger):
+        """初始化线程日志写入器。"""
         self.thread_task_map = thread_task_map
         self.logs = logs
         self.pending = pending
@@ -461,7 +462,24 @@ class ThreadLogWriter:
         head = text.split(":", 1)[0]
         return head.endswith("Error") or head.endswith("Exception")
 
+    def is_traceback_chain_marker(self, line: str) -> bool:
+        """判断是否为异常链提示行。"""
+        text = line.strip().lower()
+        if text.startswith("exception in thread "):
+            return True
+        return (
+            "during handling of the above exception, another exception occurred:" in text
+            or "the above exception was the direct cause of the following exception:" in text
+        )
+
+    def append_error_notice(self, task_id: str) -> None:
+        """追加异常摘要提示。"""
+        if self.logs[task_id] and self.logs[task_id][-1] == "任务异常，详情见 logs/error.log":
+            return
+        self.logs[task_id].append("任务异常，详情见 logs/error.log")
+
     def write(self, text: str) -> None:
+        """写入一段线程日志文本。"""
         if not text:
             return
         task_id = self.thread_task_map.get(threading.get_ident()) or getattr(TASK_LOCAL, "task_id", None)
@@ -481,21 +499,27 @@ class ThreadLogWriter:
             if line:
                 self.error_logger.write(task_id, line)
                 if self.trace_suppressing.get(task_id):
+                    if self.is_traceback_chain_marker(line):
+                        self.append_error_notice(task_id)
+                        self.trace_suppressing[task_id] = True
+                        continue
                     if self.is_exception_summary(line):
                         self.trace_suppressing[task_id] = False
                     continue
-                if self.is_traceback_start(line):
-                    self.logs[task_id].append("任务异常，详情见 logs/error.log")
+                if self.is_traceback_start(line) or self.is_traceback_chain_marker(line):
+                    self.append_error_notice(task_id)
                     self.trace_suppressing[task_id] = True
                     continue
                 self.logs[task_id].append(line)
 
     def flush(self) -> None:
+        """兼容标准输出刷新接口。"""
         return None
 
 
 class ErrorLogger:
     def __init__(self, path: Path, keywords: list, exclude_keywords: list):
+        """初始化错误日志写入器。"""
         self.path = path
         self.keywords = [item.lower() for item in keywords]
         self.exclude_keywords = [item.lower() for item in exclude_keywords]
@@ -504,6 +528,7 @@ class ErrorLogger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def should_log(self, line: str) -> bool:
+        """判断是否需要落入错误日志。"""
         text = line.lower()
         for keyword in self.exclude_keywords:
             if keyword in text:
@@ -514,6 +539,7 @@ class ErrorLogger:
         return False
 
     def write(self, task_id: str, line: str) -> None:
+        """写入单行错误日志。"""
         remaining = self.trace_remaining.get(task_id, 0)
         if remaining > 0:
             self.trace_remaining[task_id] = remaining - 1
