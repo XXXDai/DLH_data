@@ -592,6 +592,8 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
     if not tasks:
         print("未配置启动任务")
         return [], {}, {}, {}, {}, {}
+    if app_config.DATA_STORAGE_MODE == "s3":
+        cex_common.ensure_upload_workers_started()
     status_counts = {}
     status_times = {}
     status_meta = {}

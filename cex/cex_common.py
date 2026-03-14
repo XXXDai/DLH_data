@@ -35,6 +35,7 @@ UPLOAD_QUEUE = queue.Queue()  # S3上传任务队列，队列
 UPLOAD_QUEUE_LOCK = threading.Lock()  # S3上传任务去重锁，锁对象
 UPLOAD_PENDING_PATHS = set()  # S3待上传文件集合，个数
 UPLOAD_WORKERS_STARTED = False  # S3上传线程是否已启动，开关
+UPLOAD_STARTUP_SYNC_DONE = False  # S3启动补传是否已完成，开关
 UPLOAD_STATUS_LOCK = threading.Lock()  # S3上传状态锁，锁对象
 UPLOAD_ACTIVE_TASKS = {}  # S3活跃上传任务映射，个数
 
@@ -242,7 +243,7 @@ def get_upload_pool_snapshot() -> dict:
     with UPLOAD_STATUS_LOCK:
         active_tasks = list(UPLOAD_ACTIVE_TASKS.values())
     with UPLOAD_QUEUE_LOCK:
-        pending_count = len(UPLOAD_PENDING_PATHS)
+        pending_count = UPLOAD_QUEUE.qsize()
     speed_bytes_per_second = 0.0
     file_names = []
     for item in active_tasks:
@@ -254,6 +255,7 @@ def get_upload_pool_snapshot() -> dict:
         "workers": app_config.S3_UPLOAD_POOL_WORKERS,
         "active_count": len(active_tasks),
         "pending_count": pending_count,
+        "startup_synced": UPLOAD_STARTUP_SYNC_DONE,
         "speed_bytes_per_second": speed_bytes_per_second,
         "file_names": file_names,
     }
@@ -278,6 +280,8 @@ def upload_file_to_s3_blocking(file_path: Path) -> None:
                 Config=get_s3_transfer_config(),
                 Callback=tracker,
             )
+            if file_path.exists():
+                file_path.unlink()
             return
         except NoCredentialsError as exc:
             raise RuntimeError("S3上传失败: 缺少凭证") from exc
@@ -314,9 +318,11 @@ def ensure_upload_workers_started() -> None:
     """确保S3上传线程池已启动。"""
     global UPLOAD_WORKERS_STARTED
     if UPLOAD_WORKERS_STARTED:
+        sync_local_files_to_s3_on_startup()
         return
     with UPLOAD_QUEUE_LOCK:
         if UPLOAD_WORKERS_STARTED:
+            sync_local_files_to_s3_on_startup()
             return
         for index in range(app_config.S3_UPLOAD_POOL_WORKERS):
             worker = threading.Thread(
@@ -326,6 +332,7 @@ def ensure_upload_workers_started() -> None:
             )
             worker.start()
         UPLOAD_WORKERS_STARTED = True
+    sync_local_files_to_s3_on_startup()
 
 
 def enqueue_file_for_s3_upload(file_path: Path) -> None:
@@ -353,6 +360,58 @@ def build_s3_prefix(dir_path: Path) -> str | None:
         return None
     prefix = f"{app_config.S3_PREFIX}/{relative_path.as_posix().rstrip('/')}"
     return prefix + "/"
+
+
+def s3_object_exists(file_path: Path) -> bool:
+    """判断文件是否已存在于S3。"""
+    s3_key = build_s3_key(file_path)
+    if not s3_key:
+        return False
+    try:
+        get_s3_client().head_object(Bucket=app_config.S3_BUCKET_NAME, Key=s3_key)
+        return True
+    except NoCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 缺少凭证") from exc
+    except PartialCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 凭证不完整") from exc
+    except ConnectTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 连接超时") from exc
+    except ReadTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 读取超时") from exc
+    except EndpointConnectionError as exc:
+        raise RuntimeError("S3检查失败: 无法连接S3端点") from exc
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        raise RuntimeError(f"S3检查失败: {code or '未知错误'}") from exc
+
+
+def sync_local_files_to_s3_on_startup() -> None:
+    """启动时按S3现状补传并清理本地文件。"""
+    global UPLOAD_STARTUP_SYNC_DONE
+    if UPLOAD_STARTUP_SYNC_DONE:
+        return
+    if not is_s3_storage_mode():
+        UPLOAD_STARTUP_SYNC_DONE = True
+        return
+    if not cex_config.DATA_DYLAN_ROOT.exists():
+        UPLOAD_STARTUP_SYNC_DONE = True
+        return
+    local_files = sorted([path for path in cex_config.DATA_DYLAN_ROOT.rglob("*") if path.is_file()])
+    for file_path in local_files:
+        if file_path.name.endswith(".part"):
+            continue
+        if s3_object_exists(file_path):
+            file_path.unlink()
+            continue
+        file_key = str(file_path.resolve())
+        with UPLOAD_QUEUE_LOCK:
+            if file_key in UPLOAD_PENDING_PATHS:
+                continue
+            UPLOAD_PENDING_PATHS.add(file_key)
+        UPLOAD_QUEUE.put(file_path.resolve())
+    UPLOAD_STARTUP_SYNC_DONE = True
 
 
 def list_s3_file_names(dir_path: Path) -> list[str]:
