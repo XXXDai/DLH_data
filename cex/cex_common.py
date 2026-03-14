@@ -5,6 +5,7 @@ from pathlib import Path
 import csv
 import gzip
 import json
+import queue
 import socket
 import subprocess
 import threading
@@ -30,6 +31,12 @@ from cex import cex_config
 
 PART_FILE_STALE_SECONDS = 30 * 60  # 临时文件过期时间，秒
 FAILURE_FILE_LOCK = threading.Lock()  # 失败记录文件写入锁，锁对象
+UPLOAD_QUEUE = queue.Queue()  # S3上传任务队列，队列
+UPLOAD_QUEUE_LOCK = threading.Lock()  # S3上传任务去重锁，锁对象
+UPLOAD_PENDING_PATHS = set()  # S3待上传文件集合，个数
+UPLOAD_WORKERS_STARTED = False  # S3上传线程是否已启动，开关
+UPLOAD_STATUS_LOCK = threading.Lock()  # S3上传状态锁，锁对象
+UPLOAD_ACTIVE_TASKS = {}  # S3活跃上传任务映射，个数
 
 
 def is_s3_storage_mode() -> bool:
@@ -189,6 +196,153 @@ def log_s3_transfer_give_up(action: str, file_path: Path, exc: BaseException) ->
     print(f"S3{action}失败，已保留本地文件稍后重试: {file_path} | {exc}")
 
 
+class UploadProgressTracker:
+    """记录单个上传任务的进度。"""
+
+    def __init__(self, file_path: Path):
+        """初始化单个上传任务跟踪器。"""
+        self.file_path = file_path.resolve()
+        self.worker_name = threading.current_thread().name
+        self.total_bytes = self.file_path.stat().st_size if self.file_path.exists() else 0
+        self.uploaded_bytes = 0
+        self.started_at = time.time()
+        self.updated_at = self.started_at
+        with UPLOAD_STATUS_LOCK:
+            UPLOAD_ACTIVE_TASKS[self.worker_name] = {
+                "file_path": str(self.file_path),
+                "file_name": self.file_path.name,
+                "uploaded_bytes": self.uploaded_bytes,
+                "total_bytes": self.total_bytes,
+                "started_at": self.started_at,
+                "updated_at": self.updated_at,
+            }
+
+    def __call__(self, bytes_amount: int) -> None:
+        """接收单次上传进度回调。"""
+        self.uploaded_bytes += bytes_amount
+        self.updated_at = time.time()
+        with UPLOAD_STATUS_LOCK:
+            UPLOAD_ACTIVE_TASKS[self.worker_name] = {
+                "file_path": str(self.file_path),
+                "file_name": self.file_path.name,
+                "uploaded_bytes": self.uploaded_bytes,
+                "total_bytes": self.total_bytes,
+                "started_at": self.started_at,
+                "updated_at": self.updated_at,
+            }
+
+    def finish(self) -> None:
+        """结束当前上传任务跟踪。"""
+        with UPLOAD_STATUS_LOCK:
+            UPLOAD_ACTIVE_TASKS.pop(self.worker_name, None)
+
+
+def get_upload_pool_snapshot() -> dict:
+    """返回上传池当前状态快照。"""
+    with UPLOAD_STATUS_LOCK:
+        active_tasks = list(UPLOAD_ACTIVE_TASKS.values())
+    with UPLOAD_QUEUE_LOCK:
+        pending_count = len(UPLOAD_PENDING_PATHS)
+    speed_bytes_per_second = 0.0
+    file_names = []
+    for item in active_tasks:
+        file_names.append(item["file_name"])
+        elapsed_seconds = max(0.001, time.time() - float(item["started_at"]))
+        speed_bytes_per_second += float(item["uploaded_bytes"]) / elapsed_seconds
+    return {
+        "enabled": is_s3_storage_mode(),
+        "workers": app_config.S3_UPLOAD_POOL_WORKERS,
+        "active_count": len(active_tasks),
+        "pending_count": pending_count,
+        "speed_bytes_per_second": speed_bytes_per_second,
+        "file_names": file_names,
+    }
+
+
+def upload_file_to_s3_blocking(file_path: Path) -> None:
+    """同步上传单个本地文件到S3。"""
+    if not is_s3_storage_mode():
+        return
+    if not file_path.exists() or not file_path.is_file():
+        return
+    s3_key = build_s3_key(file_path)
+    if not s3_key:
+        return
+    for attempt in range(1, app_config.S3_TRANSFER_RETRY_TIMES + 1):
+        tracker = UploadProgressTracker(file_path)
+        try:
+            get_s3_client().upload_file(
+                str(file_path),
+                app_config.S3_BUCKET_NAME,
+                s3_key,
+                Config=get_s3_transfer_config(),
+                Callback=tracker,
+            )
+            return
+        except NoCredentialsError as exc:
+            raise RuntimeError("S3上传失败: 缺少凭证") from exc
+        except PartialCredentialsError as exc:
+            raise RuntimeError("S3上传失败: 凭证不完整") from exc
+        except ClientError as exc:
+            raise RuntimeError(f"S3上传失败: {exc.response.get('Error', {}).get('Code', '未知错误')}") from exc
+        except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError, ConnectionClosedError) as exc:
+            if attempt >= app_config.S3_TRANSFER_RETRY_TIMES:
+                log_s3_transfer_give_up("上传", file_path, exc)
+                return
+            log_s3_transfer_retry("上传", file_path, attempt, exc)
+            maybe_sleep_for_s3_retry(attempt)
+        finally:
+            tracker.finish()
+
+
+def upload_worker_loop() -> None:
+    """循环处理S3上传队列。"""
+    while True:
+        file_path = UPLOAD_QUEUE.get()
+        try:
+            try:
+                upload_file_to_s3_blocking(file_path)
+            except RuntimeError as exc:
+                print(f"S3上传线程异常，已跳过当前文件: {file_path} | {exc}")
+        finally:
+            with UPLOAD_QUEUE_LOCK:
+                UPLOAD_PENDING_PATHS.discard(str(file_path))
+            UPLOAD_QUEUE.task_done()
+
+
+def ensure_upload_workers_started() -> None:
+    """确保S3上传线程池已启动。"""
+    global UPLOAD_WORKERS_STARTED
+    if UPLOAD_WORKERS_STARTED:
+        return
+    with UPLOAD_QUEUE_LOCK:
+        if UPLOAD_WORKERS_STARTED:
+            return
+        for index in range(app_config.S3_UPLOAD_POOL_WORKERS):
+            worker = threading.Thread(
+                target=upload_worker_loop,
+                name=f"s3-upload-{index + 1}",
+                daemon=True,
+            )
+            worker.start()
+        UPLOAD_WORKERS_STARTED = True
+
+
+def enqueue_file_for_s3_upload(file_path: Path) -> None:
+    """将本地文件加入S3上传队列。"""
+    if not is_s3_storage_mode():
+        return
+    if not file_path.exists() or not file_path.is_file():
+        return
+    ensure_upload_workers_started()
+    file_key = str(file_path.resolve())
+    with UPLOAD_QUEUE_LOCK:
+        if file_key in UPLOAD_PENDING_PATHS:
+            return
+        UPLOAD_PENDING_PATHS.add(file_key)
+    UPLOAD_QUEUE.put(file_path.resolve())
+
+
 def build_s3_prefix(dir_path: Path) -> str | None:
     """构造本地目录对应的S3前缀。"""
     absolute_path = dir_path.resolve()
@@ -338,35 +492,8 @@ def get_synced_until_date(existing_dates: set[str], start_date: str, end_date: s
 
 
 def upload_file_to_s3(file_path: Path) -> None:
-    """上传单个本地文件到S3。"""
-    if not is_s3_storage_mode():
-        return
-    if not file_path.exists() or not file_path.is_file():
-        return
-    s3_key = build_s3_key(file_path)
-    if not s3_key:
-        return
-    for attempt in range(1, app_config.S3_TRANSFER_RETRY_TIMES + 1):
-        try:
-            get_s3_client().upload_file(
-                str(file_path),
-                app_config.S3_BUCKET_NAME,
-                s3_key,
-                Config=get_s3_transfer_config(),
-            )
-            return
-        except NoCredentialsError as exc:
-            raise RuntimeError("S3上传失败: 缺少凭证") from exc
-        except PartialCredentialsError as exc:
-            raise RuntimeError("S3上传失败: 凭证不完整") from exc
-        except ClientError as exc:
-            raise RuntimeError(f"S3上传失败: {exc.response.get('Error', {}).get('Code', '未知错误')}") from exc
-        except (ConnectTimeoutError, ReadTimeoutError, EndpointConnectionError, ConnectionClosedError) as exc:
-            if attempt >= app_config.S3_TRANSFER_RETRY_TIMES:
-                log_s3_transfer_give_up("上传", file_path, exc)
-                return
-            log_s3_transfer_retry("上传", file_path, attempt, exc)
-            maybe_sleep_for_s3_retry(attempt)
+    """提交单个本地文件到S3上传队列。"""
+    enqueue_file_for_s3_upload(file_path)
 
 
 def replace_output_file(tmp_path: Path, output_path: Path) -> None:

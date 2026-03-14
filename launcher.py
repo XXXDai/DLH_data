@@ -10,6 +10,7 @@ import threading
 import time
 import unicodedata
 import app_config
+from cex import cex_common
 from cex import cex_config
 import D10001.d10001download as d10001download
 import D10005.d10005download as d10005download
@@ -273,6 +274,38 @@ def draw_rule(stdscr, row: int, col: int, width: int) -> None:
     if width <= 0:
         return
     stdscr.hline(row, col, curses.ACS_HLINE, width)
+
+
+def format_speed_text(speed_bytes_per_second: float) -> str:
+    """格式化上传速度文本。"""
+    if speed_bytes_per_second <= 0:
+        return "0 B/s"
+    units = ["B/s", "KB/s", "MB/s", "GB/s"]
+    value = float(speed_bytes_per_second)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024.0
+        unit_index += 1
+    if value >= 100:
+        return f"{value:.0f} {units[unit_index]}"
+    if value >= 10:
+        return f"{value:.1f} {units[unit_index]}"
+    return f"{value:.2f} {units[unit_index]}"
+
+
+def build_upload_pool_text(max_cells: int) -> str:
+    """构造上传池状态文本。"""
+    snapshot = cex_common.get_upload_pool_snapshot()
+    if not snapshot["enabled"]:
+        return "上传池: 关闭"
+    file_text = "、".join(snapshot["file_names"]) if snapshot["file_names"] else "-"
+    text = (
+        f"上传池: {snapshot['active_count']}/{snapshot['workers']} | "
+        f"待上传: {snapshot['pending_count']} | "
+        f"速度: {format_speed_text(snapshot['speed_bytes_per_second'])} | "
+        f"文件: {file_text}"
+    )
+    return truncate_by_cells(text, max_cells)
 
 
 def parse_download_status(text: str) -> tuple[str, str, str, str]:
@@ -662,7 +695,12 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             current = exchange_tasks[task_selected[current_exchange]]
         else:
             current = None
-        title_text = f"DLH Data | 交易所: {current_exchange.upper()} | 焦点: {'状态' if focus == 'status' else '任务'} | 存储: {app_config.DATA_STORAGE_MODE}"
+        title_text = (
+            f"DLH Data | 交易所: {current_exchange.upper()} | "
+            f"焦点: {'状态' if focus == 'status' else '任务'} | "
+            f"存储: {app_config.DATA_STORAGE_MODE} | "
+            f"{build_upload_pool_text(max_cols)}"
+        )
         draw_clipped_text(stdscr, header_row, 0, title_text, max_cols - 1, title_attr)
         if max_rows > tabs_row:
             tab_col = 0
