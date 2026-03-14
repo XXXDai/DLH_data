@@ -51,6 +51,7 @@ TASK_DEFS = [
 
 
 TASK_LOCAL = threading.local()  # 任务线程上下文，线程
+UPLOAD_VIEW_ID = "__upload__"  # 上传管理页签标识，字符串
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -308,6 +309,30 @@ def build_upload_pool_text(max_cells: int) -> str:
     return truncate_by_cells(text, max_cells)
 
 
+def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr: int, warm_attr: int, title_attr: int) -> None:
+    """绘制上传管理页面。"""
+    snapshot = cex_common.get_upload_pool_snapshot()
+    section_row = 3
+    subheader_row = 4
+    content_row = 5
+    draw_clipped_text(stdscr, section_row, 0, "上传管理", max_cols - 1, header_attr)
+    summary_text = (
+        f"状态: {'已初始化' if snapshot['startup_synced'] else '启动扫描中'} | "
+        f"线程: {snapshot['active_count']}/{snapshot['workers']} | "
+        f"待上传: {snapshot['pending_count']} | "
+        f"速度: {format_speed_text(snapshot['speed_bytes_per_second'])}"
+    )
+    draw_clipped_text(stdscr, subheader_row, 0, summary_text, max_cols - 1, warm_attr)
+    draw_clipped_text(stdscr, content_row, 0, "当前文件", max_cols - 1, header_attr)
+    file_names = snapshot["file_names"] or ["当前无活跃上传"]
+    row = content_row + 1
+    for file_name in file_names:
+        if row >= footer_row - 1:
+            break
+        draw_clipped_text(stdscr, row, 0, f"- {file_name}", max_cols - 1, title_attr if file_name != "当前无活跃上传" else 0)
+        row += 1
+
+
 def parse_download_status(text: str) -> tuple[str, str, str, str]:
     """解析历史下载状态文本。"""
     text = (text or "").strip()
@@ -350,8 +375,16 @@ def group_tasks_by_exchange(tasks: list) -> tuple[list[str], dict]:
     grouped = {}
     for exchange in cex_config.list_exchanges():
         grouped[exchange] = list(tasks)
-    exchanges = [exchange for exchange in cex_config.list_exchanges() if grouped.get(exchange)]
+    grouped[UPLOAD_VIEW_ID] = []
+    exchanges = [exchange for exchange in cex_config.list_exchanges() if grouped.get(exchange)] + [UPLOAD_VIEW_ID]
     return exchanges, grouped
+
+
+def get_view_label(view_id: str) -> str:
+    """返回页签显示名称。"""
+    if view_id == UPLOAD_VIEW_ID:
+        return "上传管理"
+    return view_id.upper()
 
 
 def split_status_bucket_by_exchange(bucket: dict, exchange: str) -> tuple[dict, dict]:
@@ -692,22 +725,25 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             continue
         current_exchange = exchanges[selected_exchange]
         exchange_tasks = grouped_tasks.get(current_exchange, [])
-        if exchange_tasks:
+        if current_exchange != UPLOAD_VIEW_ID and exchange_tasks:
             task_selected[current_exchange] = max(0, min(task_selected[current_exchange], len(exchange_tasks) - 1))
             current = exchange_tasks[task_selected[current_exchange]]
         else:
             current = None
-        title_text = (
-            f"DLH Data | 交易所: {current_exchange.upper()} | "
-            f"焦点: {'状态' if focus == 'status' else '任务'} | "
-            f"存储: {app_config.DATA_STORAGE_MODE} | "
-            f"{build_upload_pool_text(max_cols)}"
-        )
+        view_label = get_view_label(current_exchange)
+        if current_exchange == UPLOAD_VIEW_ID:
+            title_text = f"DLH Data | 视图: {view_label} | 存储: {app_config.DATA_STORAGE_MODE}"
+        else:
+            title_text = (
+                f"DLH Data | 交易所: {view_label} | "
+                f"焦点: {'状态' if focus == 'status' else '任务'} | "
+                f"存储: {app_config.DATA_STORAGE_MODE}"
+            )
         draw_clipped_text(stdscr, header_row, 0, title_text, max_cols - 1, title_attr)
         if max_rows > tabs_row:
             tab_col = 0
             for idx, exchange in enumerate(exchanges):
-                label = f" {exchange.upper()} "
+                label = f" {get_view_label(exchange)} "
                 tab_attr = focus_attr if idx == selected_exchange else header_attr
                 draw_clipped_text(stdscr, tabs_row, tab_col, label, max_cols - tab_col - 1, tab_attr)
                 tab_col += sum(cell_width(ch) for ch in label) + 1
@@ -715,6 +751,22 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     break
         if max_rows > rule_row:
             draw_rule(stdscr, rule_row, 0, max_cols - 1)
+        if current_exchange == UPLOAD_VIEW_ID:
+            render_upload_management(stdscr, max_cols, footer_row, header_attr, warm_attr, title_attr)
+            footer_text = "←→ 切页签  q 退出"
+            if footer_row > 0:
+                draw_rule(stdscr, footer_row - 1, 0, max_cols - 1)
+            draw_clipped_text(stdscr, footer_row, 0, footer_text, max_cols - 1, warm_attr)
+            stdscr.refresh()
+            key = stdscr.getch()
+            if key == ord("q"):
+                break
+            if key == curses.KEY_LEFT:
+                selected_exchange = (selected_exchange - 1) % len(exchanges)
+            if key == curses.KEY_RIGHT:
+                selected_exchange = (selected_exchange + 1) % len(exchanges)
+            time.sleep(app_config.TUI_REFRESH_SECONDS)
+            continue
         now_ts = time.time()
         if now_ts - last_schedule_ts >= SCHEDULE_REFRESH_SECONDS:
             last_schedule_ts = now_ts
