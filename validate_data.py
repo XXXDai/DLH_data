@@ -158,6 +158,8 @@ def validate_orderbook_di(
 
     for symbol_dir in iter_storage_dirs(data_dir):
         symbol = symbol_dir.name
+        if symbol.startswith("__"):
+            continue
         observed_symbols.add(symbol)
         if allow_delivery and is_delivery_symbol(symbol):
             base = delivery_base_symbol(symbol)
@@ -268,6 +270,8 @@ def validate_trade_di(
 
     for symbol_dir in iter_storage_dirs(data_dir):
         symbol = symbol_dir.name
+        if symbol.startswith("__"):
+            continue
         observed_symbols.add(symbol)
         if allow_delivery and is_delivery_symbol(symbol):
             base = delivery_base_symbol(symbol)
@@ -352,6 +356,8 @@ def validate_bitget_trade_raw_di(
 
     for symbol_dir in iter_storage_dirs(data_dir):
         symbol = symbol_dir.name
+        if symbol.startswith("__"):
+            continue
         observed_symbols.add(symbol)
         if allow_delivery and is_delivery_symbol(symbol):
             base = delivery_base_symbol(symbol)
@@ -431,6 +437,8 @@ def validate_single_csv_per_symbol(
     symbol_set = set(symbols)
     for symbol_dir in iter_storage_dirs(data_dir):
         symbol = symbol_dir.name
+        if symbol.startswith("__"):
+            continue
         observed.add(symbol)
         if symbols and symbol not in symbol_set:
             report.error(f"{dataset_id} 发现未配置的目录: {symbol}")

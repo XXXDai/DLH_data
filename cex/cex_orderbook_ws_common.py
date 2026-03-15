@@ -250,6 +250,36 @@ def list_bybit_delivery_symbol_times(start_date: str) -> dict[str, int]:
     return {symbol: symbol_times[symbol] for symbol in sorted(symbols)}
 
 
+def list_bybit_delivery_symbol_start_dates(start_date: str) -> dict[str, str]:
+    """拉取Bybit指定起始日之后的交割合约起始日期映射。"""
+    start_ms = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    symbol_dates = {}
+    for status in cex_config.BYBIT_FUTURE_DELIVERY_STATUSES:
+        cursor = None
+        while True:
+            payload = request_json(build_bybit_instruments_url(status, cursor))
+            if payload.get("retCode") != 0:
+                raise NetworkRequestError(f"接口返回错误: {payload.get('retMsg')}")
+            result = payload.get("result", {})
+            for item in result.get("list", []):
+                symbol = item.get("symbol", "")
+                contract_type = item.get("contractType", "")
+                launch_time = int(item.get("launchTime", "0") or 0)
+                if "Futures" not in contract_type:
+                    continue
+                if not launch_time or launch_time < start_ms:
+                    continue
+                base_symbol = symbol.split("-")[0] if symbol else ""
+                if base_symbol in cex_config.BYBIT_FUTURE_DELIVERY_EXCLUDE:
+                    continue
+                if base_symbol in cex_config.get_delivery_families("bybit"):
+                    symbol_dates[symbol] = datetime.fromtimestamp(launch_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            cursor = result.get("nextPageCursor")
+            if not cursor:
+                break
+    return {symbol: symbol_dates[symbol] for symbol in sorted(symbol_dates)}
+
+
 def list_bybit_delivery_symbols_since(start_date: str) -> list[str]:
     """拉取Bybit指定起始日之后的交割合约。"""
     return sorted(list_bybit_delivery_symbol_times(start_date).keys())
@@ -284,6 +314,32 @@ def list_okx_delivery_symbols() -> list[str]:
                 continue
             symbols.add(inst_id)
     return sorted(symbols)
+
+
+def list_okx_delivery_symbol_start_dates() -> dict[str, str]:
+    """拉取OKX当前可订阅交割合约的起始日期映射。"""
+    now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    symbol_dates = {}
+    for family in cex_config.get_delivery_families("okx"):
+        try:
+            payload = request_json(f"{OKX_INSTRUMENTS_URL}?{urlencode({'instType': 'FUTURES', 'instFamily': family})}")
+        except NetworkRequestError:
+            continue
+        if payload.get("code") != "0":
+            raise NetworkRequestError(f"接口返回错误: {payload.get('msg')}")
+        for item in payload.get("data", []):
+            inst_id = item.get("instId", "")
+            state = item.get("state", "")
+            exp_time = int(item.get("expTime", "0") or 0)
+            list_time = int(item.get("listTime", "0") or 0)
+            if state not in {"live", "preopen"}:
+                continue
+            if exp_time and exp_time < now_ms:
+                continue
+            if not list_time:
+                continue
+            symbol_dates[inst_id] = datetime.fromtimestamp(list_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    return {symbol: symbol_dates[symbol] for symbol in sorted(symbol_dates)}
 
 
 def resolve_symbols(exchange: str, market: str) -> list[str]:

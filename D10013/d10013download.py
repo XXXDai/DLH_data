@@ -31,8 +31,8 @@ from cex.cex_common import seconds_until_next_utc_4h
 from cex.cex_common import update_failure_file
 from cex.cex_common import write_gzip_csv_rows
 from cex.cex_orderbook_ws_common import NetworkRequestError
+from cex.cex_orderbook_ws_common import list_bybit_delivery_symbol_start_dates
 from cex.cex_orderbook_ws_common import list_bybit_delivery_symbols_since
-from cex.cex_orderbook_ws_common import list_okx_delivery_symbols
 from cex.cex_trade_common import NORMALIZED_TRADE_FIELDS
 from cex.cex_trade_common import normalize_bitget_trade_row
 from cex.cex_trade_common import normalize_binance_future_parts
@@ -85,6 +85,11 @@ def build_fail_log_path() -> Path:
 def build_output_path(base_dir: Path, symbol: str, date_str: str) -> Path:
     """构造输出文件路径。"""
     return base_dir / symbol / f"{symbol}{date_str}.csv.gz"
+
+
+def build_okx_delivery_state_path(base_dir: Path, family: str, date_str: str) -> Path:
+    """构造OKX交割合约家族同步标记路径。"""
+    return base_dir / "__okx_futureschain_state" / family / f"{date_str}.done"
 
 
 def build_bitget_output_path(base_dir: Path, symbol: str, shard_name: str) -> Path:
@@ -166,24 +171,23 @@ def build_bitget_request(url: str) -> Request:
     )
 
 
-def resolve_bybit_symbols() -> list[str]:
-    """解析Bybit期货成交交易对列表。"""
+def resolve_bybit_symbols() -> tuple[list[str], dict[str, str]]:
+    """解析Bybit期货成交交易对列表与起始日期。"""
     symbols = set(cex_config.get_future_trade_symbols("bybit"))
+    start_dates = {}
     try:
         symbols.update(list_bybit_delivery_symbols_since(cex_config.get_min_start_date(DATASET_ID, "bybit")))
+        start_dates.update(list_bybit_delivery_symbol_start_dates(cex_config.get_min_start_date(DATASET_ID, "bybit")))
     except NetworkRequestError as exc:
         log(f"bybit future 动态交割合约刷新失败，继续使用静态列表: {exc}")
-    return sorted(symbols)
+    return sorted(symbols), start_dates
 
 
-def resolve_okx_symbols() -> list[str]:
-    """解析OKX期货成交交易对列表。"""
+def resolve_okx_symbols() -> tuple[list[str], dict[str, str]]:
+    """解析OKX期货成交交易对列表与起始日期。"""
     symbols = set(cex_config.get_future_trade_symbols("okx"))
-    try:
-        symbols.update(list_okx_delivery_symbols())
-    except NetworkRequestError as exc:
-        log(f"okx future 动态交割合约刷新失败，继续使用静态列表: {exc}")
-    return sorted(symbols)
+    symbols.update(cex_config.get_delivery_families("okx"))
+    return sorted(symbols), {}
 
 
 def parse_bitget_date_from_name(file_name: str) -> str | None:
@@ -212,6 +216,27 @@ def get_existing_dates(base_dir: Path, exchange: str, symbol: str) -> set[str]:
         if date_str and re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
             dates.add(date_str)
     return dates
+
+
+def get_existing_okx_delivery_family_dates(base_dir: Path, family: str) -> set[str]:
+    """获取OKX交割合约家族已完成日期集合。"""
+    dates = set()
+    for file_name in list_storage_file_names(base_dir / "__okx_futureschain_state" / family):
+        if not file_name.endswith(".done"):
+            continue
+        date_text = file_name.removesuffix(".done")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text):
+            dates.add(date_text)
+    return dates
+
+
+def write_okx_delivery_family_state(base_dir: Path, family: str, date_str: str) -> None:
+    """写入OKX交割合约家族同步标记。"""
+    state_path = build_okx_delivery_state_path(base_dir, family, date_str)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = state_path.with_name(state_path.name + ".part")
+    tmp_path.write_text(date_str, encoding="utf-8")
+    replace_output_file(tmp_path, state_path)
 
 
 def get_latest_local_date(base_dir: Path, symbol: str) -> str | None:
@@ -325,6 +350,14 @@ def write_daily_rows(base_dir: Path, symbol: str, rows_by_date: dict) -> int:
     return total
 
 
+def write_daily_rows_by_symbol(base_dir: Path, rows_by_symbol: dict) -> int:
+    """按交易对和日期写入标准化成交文件。"""
+    total = 0
+    for symbol, rows_by_date in rows_by_symbol.items():
+        total += write_daily_rows(base_dir, symbol, rows_by_date)
+    return total
+
+
 def append_rows_to_file(file_path: Path, rows: list[dict]) -> int:
     """向压缩成交文件追加标准化记录。"""
     return write_gzip_csv_rows(file_path, NORMALIZED_TRADE_FIELDS, rows, True)
@@ -361,9 +394,9 @@ def split_binance_zip(content: bytes, symbol: str, base_dir: Path) -> int:
     return write_daily_rows(base_dir, symbol, rows_by_date)
 
 
-def split_okx_zip(content: bytes, symbol: str, base_dir: Path) -> int:
+def split_okx_zip(content: bytes, base_dir: Path) -> int:
     """拆分OKX压缩期货成交文件。"""
-    rows_by_date = defaultdict(list)
+    rows_by_symbol = defaultdict(lambda: defaultdict(list))
     with zipfile.ZipFile(BytesIO(content), "r") as zf:
         name = zf.namelist()[0]
         with zf.open(name) as f:
@@ -372,8 +405,8 @@ def split_okx_zip(content: bytes, symbol: str, base_dir: Path) -> int:
                 normalized = normalize_okx_trade_row(row)
                 if normalized:
                     date_str, item = normalized
-                    rows_by_date[date_str].append(item)
-    return write_daily_rows(base_dir, symbol, rows_by_date)
+                    rows_by_symbol[item["symbol"]][date_str].append(item)
+    return write_daily_rows_by_symbol(base_dir, rows_by_symbol)
 
 
 def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
@@ -396,7 +429,7 @@ def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str
     except RuntimeError as exc:
         append_failure(fail_path, failure_key, "okx", symbol, url, str(exc))
         return False
-    count = split_okx_zip(content, symbol, base_dir)
+    count = split_okx_zip(content, base_dir)
     clear_failure(fail_path, failure_key)
     log(f"okx {symbol} 已写入记录数: {count}")
     return True
@@ -530,6 +563,7 @@ def sync_bitget_month(symbol: str, missing_dates: list[str], fail_path: Path, sy
 
 def fetch_okx_download_urls(symbol: str, start_day: str, end_day: str, date_aggr_type: str) -> list:
     """获取OKX期货成交归档链接。"""
+    delivery_families = set(cex_config.get_delivery_families("okx"))
     inst_type = "SWAP" if symbol.endswith("-SWAP") else "FUTURES"
     begin_ms, end_ms = build_okx_query_range(start_day, end_day)
     params = {
@@ -542,6 +576,8 @@ def fetch_okx_download_urls(symbol: str, start_day: str, end_day: str, date_aggr
     if inst_type == "SWAP":
         parts = symbol.split("-")
         params["instFamilyList"] = f"{parts[0]}-{parts[1]}"
+    elif symbol in delivery_families:
+        params["instFamilyList"] = symbol
     else:
         params["instIdList"] = symbol
     data = request_okx_json(f"{OKX_MARKET_HISTORY_URL}?{urlencode(params)}")
@@ -553,7 +589,7 @@ def fetch_okx_download_urls(symbol: str, start_day: str, end_day: str, date_aggr
             for item in detail.get("groupDetails", []):
                 url = item.get("url", "")
                 file_name = item.get("filename", "")
-                if url and file_name.startswith(symbol):
+                if url and (file_name.startswith(symbol) or (symbol in delivery_families and file_name.startswith(f"{symbol}-futureschain-"))):
                     urls.append(url)
     return urls
 
@@ -580,6 +616,9 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
         for url in urls:
             file_name = url.rsplit("/", 1)[-1]
             if download_okx_archive(base_dir, symbol, url, f"okx:{symbol}:month:{month_tag}", fail_path):
+                if symbol in cex_config.get_delivery_families("okx"):
+                    for day_text in missing_dates:
+                        write_okx_delivery_family_state(base_dir, symbol, day_text)
                 synced_days += len(missing_dates)
                 status_update("okx", symbol, (synced_days, f"月 {month_tag} {file_name}"))
                 return synced_days, True
@@ -598,6 +637,8 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
             continue
         file_name = urls[0].rsplit("/", 1)[-1]
         if download_okx_archive(base_dir, symbol, urls[0], f"okx:{symbol}:day:{day_text}", fail_path):
+            if symbol in cex_config.get_delivery_families("okx"):
+                write_okx_delivery_family_state(base_dir, symbol, day_text)
             synced_days += 1
             status_update("okx", symbol, (synced_days, f"日 {day_text} {file_name}"))
         else:
@@ -620,7 +661,7 @@ def sync_bybit_month(symbol: str, missing_dates: list[str], fail_path: Path, syn
     return synced_days, True
 
 
-def run_exchange(exchange: str, symbols: list, month_worker) -> None:
+def run_exchange(exchange: str, symbols: list, month_worker, dynamic_start_dates: dict[str, str] | None = None) -> None:
     """按月执行单个交易所同步。"""
     if not cex_config.is_supported(DATASET_ID, exchange):
         for symbol in symbols:
@@ -633,15 +674,19 @@ def run_exchange(exchange: str, symbols: list, month_worker) -> None:
     end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
     if end_dt < datetime(2000, 1, 1):
         return
+    dynamic_start_dates = dynamic_start_dates or {}
     state_list = []
     month_anchor_dates = []
     end_date = end_dt.strftime("%Y-%m-%d")
     for symbol in symbols:
-        start_date = cex_config.get_start_date(DATASET_ID, exchange, symbol) or cex_config.get_min_start_date(DATASET_ID, exchange)
+        start_date = dynamic_start_dates.get(symbol) or cex_config.get_start_date(DATASET_ID, exchange, symbol) or cex_config.get_min_start_date(DATASET_ID, exchange)
         if not start_date:
             status_update(exchange, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
             continue
-        existing_dates = get_existing_dates(base_dir, exchange, symbol)
+        if exchange == "okx" and symbol in cex_config.get_delivery_families("okx"):
+            existing_dates = get_existing_okx_delivery_family_dates(base_dir, symbol)
+        else:
+            existing_dates = get_existing_dates(base_dir, exchange, symbol)
         synced_days = count_existing_days(existing_dates, start_date, end_date)
         synced_until = get_synced_until_date(existing_dates, start_date, end_date)
         missing_dates = list_missing_dates(existing_dates, start_date, end_date)
@@ -684,10 +729,12 @@ def run_exchange(exchange: str, symbols: list, month_worker) -> None:
 def main() -> None:
     """运行期货成交下载主循环。"""
     while True:
+        bybit_symbols, bybit_start_dates = resolve_bybit_symbols()
+        okx_symbols, okx_start_dates = resolve_okx_symbols()
         threads = [
             threading.Thread(
                 target=run_exchange,
-                args=("bybit", resolve_bybit_symbols(), sync_bybit_month),
+                args=("bybit", bybit_symbols, sync_bybit_month, bybit_start_dates),
                 daemon=True,
             ),
             threading.Thread(
@@ -702,7 +749,7 @@ def main() -> None:
             ),
             threading.Thread(
                 target=run_exchange,
-                args=("okx", resolve_okx_symbols(), sync_okx_month),
+                args=("okx", okx_symbols, sync_okx_month, okx_start_dates),
                 daemon=True,
             ),
         ]
