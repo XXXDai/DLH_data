@@ -38,6 +38,16 @@ UPLOAD_WORKERS_STARTED = False  # S3上传线程是否已启动，开关
 UPLOAD_STARTUP_SYNC_DONE = False  # S3启动补传是否已完成，开关
 UPLOAD_STATUS_LOCK = threading.Lock()  # S3上传状态锁，锁对象
 UPLOAD_ACTIVE_TASKS = {}  # S3活跃上传任务映射，个数
+UPLOAD_STARTUP_STATUS_LOCK = threading.Lock()  # S3启动扫描状态锁，锁对象
+UPLOAD_STARTUP_STATUS = {  # S3启动扫描状态，映射
+    "phase": "未开始",  # 当前阶段，字符串
+    "current": 0,  # 当前进度，个数
+    "total": 0,  # 总进度，个数
+    "file_name": "-",  # 当前文件名，字符串
+    "queued": 0,  # 已入队文件数，个数
+    "deleted": 0,  # 已删除本地文件数，个数
+    "done": False,  # 是否完成，开关
+}  # S3启动扫描状态，映射
 
 
 def is_s3_storage_mode() -> bool:
@@ -244,6 +254,9 @@ def get_upload_pool_snapshot() -> dict:
         active_tasks = list(UPLOAD_ACTIVE_TASKS.values())
     with UPLOAD_QUEUE_LOCK:
         pending_count = UPLOAD_QUEUE.qsize()
+        pending_file_names = []
+        for file_path in list(UPLOAD_QUEUE.queue)[:15]:
+            pending_file_names.append(Path(file_path).name)
     speed_bytes_per_second = 0.0
     file_names = []
     for item in active_tasks:
@@ -258,7 +271,26 @@ def get_upload_pool_snapshot() -> dict:
         "startup_synced": UPLOAD_STARTUP_SYNC_DONE,
         "speed_bytes_per_second": speed_bytes_per_second,
         "file_names": file_names,
+        "pending_file_names": pending_file_names,
     }
+
+
+def update_upload_startup_status(phase: str, current: int, total: int, file_name: str, queued: int, deleted: int, done: bool) -> None:
+    """更新S3启动扫描状态。"""
+    with UPLOAD_STARTUP_STATUS_LOCK:
+        UPLOAD_STARTUP_STATUS["phase"] = phase
+        UPLOAD_STARTUP_STATUS["current"] = current
+        UPLOAD_STARTUP_STATUS["total"] = total
+        UPLOAD_STARTUP_STATUS["file_name"] = file_name
+        UPLOAD_STARTUP_STATUS["queued"] = queued
+        UPLOAD_STARTUP_STATUS["deleted"] = deleted
+        UPLOAD_STARTUP_STATUS["done"] = done
+
+
+def get_upload_startup_snapshot() -> dict:
+    """返回S3启动扫描状态快照。"""
+    with UPLOAD_STARTUP_STATUS_LOCK:
+        return dict(UPLOAD_STARTUP_STATUS)
 
 
 def upload_file_to_s3_blocking(file_path: Path) -> None:
@@ -391,19 +423,28 @@ def sync_local_files_to_s3_on_startup() -> None:
     """启动时按S3现状补传并清理本地文件。"""
     global UPLOAD_STARTUP_SYNC_DONE
     if UPLOAD_STARTUP_SYNC_DONE:
+        update_upload_startup_status("已完成", 0, 0, "-", 0, 0, True)
         return
     if not is_s3_storage_mode():
         UPLOAD_STARTUP_SYNC_DONE = True
+        update_upload_startup_status("本地模式", 0, 0, "-", 0, 0, True)
         return
     if not cex_config.DATA_DYLAN_ROOT.exists():
         UPLOAD_STARTUP_SYNC_DONE = True
+        update_upload_startup_status("目录不存在", 0, 0, "-", 0, 0, True)
         return
     local_files = sorted([path for path in cex_config.DATA_DYLAN_ROOT.rglob("*") if path.is_file()])
-    for file_path in local_files:
+    queued_count = 0
+    deleted_count = 0
+    update_upload_startup_status("扫描本地文件", 0, len(local_files), "-", queued_count, deleted_count, False)
+    for index, file_path in enumerate(local_files, start=1):
+        update_upload_startup_status("检查S3现状", index, len(local_files), file_path.name, queued_count, deleted_count, False)
         if file_path.name.endswith(".part"):
             continue
         if s3_object_exists(file_path):
             file_path.unlink()
+            deleted_count += 1
+            update_upload_startup_status("删除本地已同步文件", index, len(local_files), file_path.name, queued_count, deleted_count, False)
             continue
         file_key = str(file_path.resolve())
         with UPLOAD_QUEUE_LOCK:
@@ -411,7 +452,10 @@ def sync_local_files_to_s3_on_startup() -> None:
                 continue
             UPLOAD_PENDING_PATHS.add(file_key)
         UPLOAD_QUEUE.put(file_path.resolve())
+        queued_count += 1
+        update_upload_startup_status("加入上传队列", index, len(local_files), file_path.name, queued_count, deleted_count, False)
     UPLOAD_STARTUP_SYNC_DONE = True
+    update_upload_startup_status("已完成", len(local_files), len(local_files), "-", queued_count, deleted_count, True)
 
 
 def list_s3_file_names(dir_path: Path) -> list[str]:

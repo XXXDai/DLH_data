@@ -2,12 +2,13 @@ from cex import cex_orderbook_snapshot_common as orderbook_snapshot_common
 
 
 QUIET = False  # 静默模式开关，开关
+STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
 
 
 def run() -> None:
     """运行期货历史订单簿快照任务。"""
-    orderbook_snapshot_common.configure_dataset_runtime("D10011", QUIET, LOG_HOOK)
+    orderbook_snapshot_common.configure_dataset_runtime("D10011", QUIET, STATUS_HOOK, LOG_HOOK)
     orderbook_snapshot_common.run_dataset("D10001", "D10011")
 
 

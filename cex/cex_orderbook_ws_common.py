@@ -39,6 +39,8 @@ LOG_HOOK = None  # 日志回调函数，函数
 MARKET_QUIET = {"future": False, "spot": False}  # 分市场静默开关映射，映射
 MARKET_STATUS_HOOK = {"future": None, "spot": None}  # 分市场状态回调映射，映射
 MARKET_LOG_HOOK = {"future": None, "spot": None}  # 分市场日志回调映射，映射
+PRIMARY_ROLE = "primary"  # 主连接角色标识，字符串
+BACKUP_ROLE = "backup"  # 备连接角色标识，字符串
 
 
 class NetworkRequestError(RuntimeError):
@@ -317,6 +319,108 @@ def build_ws_url(exchange: str, market: str, symbol: str) -> str:
     raise RuntimeError(f"未支持的交易所: {exchange}")
 
 
+def build_ws_urls(exchange: str, market: str, symbol: str) -> list[str]:
+    """构造主备WebSocket地址列表。"""
+    primary_url = build_ws_url(exchange, market, symbol)
+    return [primary_url, primary_url]
+
+
+def build_session_state() -> dict:
+    """构造主备连接共享状态。"""
+    return {
+        "lock": threading.Lock(),
+        "active_role": PRIMARY_ROLE,
+        "connected": {PRIMARY_ROLE: False, BACKUP_ROLE: False},
+        "recv_count": {PRIMARY_ROLE: 0, BACKUP_ROLE: 0},
+        "status_text": {PRIMARY_ROLE: "准备连接", BACKUP_ROLE: "准备连接"},
+    }
+
+
+def role_label(role: str) -> str:
+    """返回连接角色显示名称。"""
+    return "主" if role == PRIMARY_ROLE else "备"
+
+
+def other_role(role: str) -> str:
+    """返回另一个连接角色。"""
+    return BACKUP_ROLE if role == PRIMARY_ROLE else PRIMARY_ROLE
+
+
+def summarize_role_status(connected: bool, status_text: str) -> str:
+    """将单个角色状态压缩为短文本。"""
+    if connected:
+        return "在线"
+    if status_text in {"准备连接", "已连接 0"}:
+        return "连接中"
+    if status_text in {"连接异常", "连接超时", "网络错误", "连接关闭"}:
+        return "重连中"
+    if status_text == "已停止":
+        return "已停"
+    return status_text
+
+
+def build_ws_status_text(state: dict) -> tuple[int, str]:
+    """构造主备连接汇总状态文本。"""
+    active_role = state["active_role"]
+    active_count = state["recv_count"][active_role]
+    primary_connected = state["connected"][PRIMARY_ROLE]
+    backup_connected = state["connected"][BACKUP_ROLE]
+    primary_short = summarize_role_status(primary_connected, state["status_text"][PRIMARY_ROLE])
+    backup_short = summarize_role_status(backup_connected, state["status_text"][BACKUP_ROLE])
+    if primary_connected and backup_connected:
+        role_summary = "主活 备连" if active_role == PRIMARY_ROLE else "备活 主连"
+    elif primary_connected:
+        role_summary = "主活 备断" if active_role == PRIMARY_ROLE else "已切主"
+    elif backup_connected:
+        role_summary = "已切备" if active_role == BACKUP_ROLE else "备活 主断"
+    else:
+        role_summary = "双断重连中"
+    online_flag = 1 if state["connected"][active_role] else 0
+    return online_flag, f"{role_summary} | 主:{primary_short} 备:{backup_short} | 消息:{active_count}"
+
+
+def is_active_role(state: dict, role: str) -> bool:
+    """判断指定角色是否为当前主用连接。"""
+    with state["lock"]:
+        return state["active_role"] == role
+
+
+def update_shared_status(
+    state: dict,
+    exchange: str,
+    market: str,
+    symbol: str,
+    role: str,
+    *,
+    connected: bool | None = None,
+    status_text: str | None = None,
+    recv_count: int | None = None,
+) -> None:
+    """更新主备共享状态并刷新统一状态文本。"""
+    with state["lock"]:
+        if connected is not None:
+            state["connected"][role] = connected
+        if status_text is not None:
+            state["status_text"][role] = status_text
+        if recv_count is not None:
+            state["recv_count"][role] = recv_count
+        online_flag, status_text_value = build_ws_status_text(state)
+    status_update(exchange, market, symbol, (online_flag, status_text_value))
+
+
+def switch_active_role(state: dict, exchange: str, market: str, symbol: str, failed_role: str) -> None:
+    """在主连接失效时切换到另一个角色。"""
+    next_role = other_role(failed_role)
+    switched = False
+    with state["lock"]:
+        if state["active_role"] == failed_role and state["connected"][next_role]:
+            state["active_role"] = next_role
+            switched = True
+    if switched:
+        log(f"{exchange} {market} {symbol} 主备切换到{role_label(next_role)}连接", market)
+    update_shared_status(state, exchange, market, symbol, failed_role)
+
+
 def send_subscribe(ws: websocket.WebSocket, exchange: str, market: str, symbol: str, depth: int) -> None:
     """发送订阅请求。"""
     if exchange == "bybit":
@@ -531,26 +635,28 @@ def flush_second_snapshot(last_snapshot: dict | None, writer, base_dir: Path, ta
     return writer
 
 
-def run_session(exchange: str, market: str, symbol: str, stop_event: threading.Event) -> None:
-    """运行单个交易对的一次WS会话。"""
+def run_session(exchange: str, market: str, symbol: str, role: str, ws_url: str, stop_event: threading.Event, state: dict) -> None:
+    """运行单个角色的一次WS会话。"""
     depth = app_config.ORDERBOOK_DEPTH_FUTURE if market == "future" else app_config.ORDERBOOK_DEPTH_SPOT
     rt_dir, rt_ss_dir, rt_ss_1s_dir, rt_tag, rt_ss_tag, rt_ss_1s_tag = build_dirs(exchange, market)
-    ws_url = build_ws_url(exchange, market, symbol)
     try:
         ws = connect_ws(ws_url)
         send_subscribe(ws, exchange, market, symbol, depth)
-        status_update(exchange, market, symbol, (1, "已连接 0"))
+        update_shared_status(state, exchange, market, symbol, role, connected=True, status_text="已连接 0", recv_count=0)
     except websocket.WebSocketException as exc:
-        status_update(exchange, market, symbol, (0, "连接异常"))
-        log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}", market)
+        update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="连接异常")
+        switch_active_role(state, exchange, market, symbol, role)
+        log(f"{exchange} {market} {symbol} {role_label(role)}连接异常，准备重连: {exc}", market)
         return
     except TimeoutError as exc:
-        status_update(exchange, market, symbol, (0, "连接超时"))
-        log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}", market)
+        update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="连接超时")
+        switch_active_role(state, exchange, market, symbol, role)
+        log(f"{exchange} {market} {symbol} {role_label(role)}连接超时，准备重连: {exc}", market)
         return
     except OSError as exc:
-        status_update(exchange, market, symbol, (0, "网络错误"))
-        log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}", market)
+        update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="网络错误")
+        switch_active_role(state, exchange, market, symbol, role)
+        log(f"{exchange} {market} {symbol} {role_label(role)}网络错误，准备重连: {exc}", market)
         return
 
     orderbook = {"bids": {}, "asks": {}}
@@ -588,23 +694,26 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
         try:
             raw = ws.recv()
         except websocket.WebSocketException as exc:
-            status_update(exchange, market, symbol, (0, "连接异常"))
-            log(f"{exchange} {market} {symbol} 连接异常，准备重连: {exc}", market)
+            update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="连接异常")
+            switch_active_role(state, exchange, market, symbol, role)
+            log(f"{exchange} {market} {symbol} {role_label(role)}连接异常，准备重连: {exc}", market)
             break
         except TimeoutError as exc:
-            status_update(exchange, market, symbol, (0, "连接超时"))
-            log(f"{exchange} {market} {symbol} 连接超时，准备重连: {exc}", market)
+            update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="连接超时")
+            switch_active_role(state, exchange, market, symbol, role)
+            log(f"{exchange} {market} {symbol} {role_label(role)}连接超时，准备重连: {exc}", market)
             break
         except OSError as exc:
-            status_update(exchange, market, symbol, (0, "网络错误"))
-            log(f"{exchange} {market} {symbol} 网络错误，准备重连: {exc}", market)
+            update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="网络错误")
+            switch_active_role(state, exchange, market, symbol, role)
+            log(f"{exchange} {market} {symbol} {role_label(role)}网络错误，准备重连: {exc}", market)
             break
         if raw == "pong":
             continue
         recv_count += 1
         now_status_ts = time.monotonic()
         if now_status_ts - last_status_ts >= STATUS_INTERVAL_SECONDS:
-            status_update(exchange, market, symbol, (1, f"消息 {recv_count}"))
+            update_shared_status(state, exchange, market, symbol, role, connected=True, status_text=f"已连接 {recv_count}", recv_count=recv_count)
             last_status_ts = now_status_ts
         collect_ts = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
         message = json.loads(raw)
@@ -621,41 +730,73 @@ def run_session(exchange: str, market: str, symbol: str, stop_event: threading.E
         else:
             raw_record, snapshots = apply_okx_message(orderbook, market, symbol, message, collect_ts, depth)
 
-        hour_str = hour_str_from_ms(collect_ts)
-        rt_writer = ensure_writer(rt_dir, symbol, hour_str, rt_tag, rt_writer)
-        write_json_line(rt_writer, raw_record)
-        for snapshot in snapshots:
-            snapshot_hour = hour_str_from_ms(snapshot["collect_ts"])
-            rt_ss_writer = ensure_writer(rt_ss_dir, symbol, snapshot_hour, rt_ss_tag, rt_ss_writer)
-            write_json_line(rt_ss_writer, snapshot)
-            second_bucket = int(snapshot["collect_ts"] / 1000)
-            if last_second is None:
-                last_second = second_bucket
-            if second_bucket != last_second and last_snapshot:
-                rt_ss_1s_writer = flush_second_snapshot(last_snapshot, rt_ss_1s_writer, rt_ss_1s_dir, rt_ss_1s_tag, symbol)
-                last_second = second_bucket
-            last_snapshot = snapshot
+        active_now = is_active_role(state, role)
+        if not active_now:
+            close_writer(rt_writer)
+            close_writer(rt_ss_writer)
+            close_writer(rt_ss_1s_writer)
+            rt_writer = None
+            rt_ss_writer = None
+            rt_ss_1s_writer = None
+        else:
+            hour_str = hour_str_from_ms(collect_ts)
+            rt_writer = ensure_writer(rt_dir, symbol, hour_str, rt_tag, rt_writer)
+            write_json_line(rt_writer, raw_record)
+            for snapshot in snapshots:
+                snapshot_hour = hour_str_from_ms(snapshot["collect_ts"])
+                rt_ss_writer = ensure_writer(rt_ss_dir, symbol, snapshot_hour, rt_ss_tag, rt_ss_writer)
+                write_json_line(rt_ss_writer, snapshot)
+                second_bucket = int(snapshot["collect_ts"] / 1000)
+                if last_second is None:
+                    last_second = second_bucket
+                if second_bucket != last_second and last_snapshot:
+                    rt_ss_1s_writer = flush_second_snapshot(last_snapshot, rt_ss_1s_writer, rt_ss_1s_dir, rt_ss_1s_tag, symbol)
+                    last_second = second_bucket
+                last_snapshot = snapshot
 
     heartbeat_closed.set()
-    if last_snapshot:
+    if last_snapshot and is_active_role(state, role):
         rt_ss_1s_writer = flush_second_snapshot(last_snapshot, rt_ss_1s_writer, rt_ss_1s_dir, rt_ss_1s_tag, symbol)
     close_writer(rt_writer)
     close_writer(rt_ss_writer)
     close_writer(rt_ss_1s_writer)
     ws.close()
+    update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="连接关闭")
+    switch_active_role(state, exchange, market, symbol, role)
 
 
-def run_symbol_loop(exchange: str, market: str, symbol: str, stop_event: threading.Event) -> None:
-    """持续维护单个交易对的WS连接。"""
-    log(f"{exchange} {market} {symbol} 订阅启动", market)
-    status_update(exchange, market, symbol, (1, "准备连接"))
+def run_role_loop(exchange: str, market: str, symbol: str, role: str, ws_url: str, stop_event: threading.Event, state: dict) -> None:
+    """持续维护单个角色的WS连接。"""
+    update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="准备连接", recv_count=0)
     while not stop_event.is_set():
-        run_session(exchange, market, symbol, stop_event)
+        run_session(exchange, market, symbol, role, ws_url, stop_event, state)
         if stop_event.is_set():
             break
         time.sleep(RECONNECT_INTERVAL_SECONDS)
+    update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="已停止")
+
+
+def run_symbol_loop(exchange: str, market: str, symbol: str, stop_event: threading.Event) -> None:
+    """持续维护单个交易对的主备WS连接。"""
+    log(f"{exchange} {market} {symbol} 主备订阅启动", market)
+    state = build_session_state()
+    primary_url, backup_url = build_ws_urls(exchange, market, symbol)
+    primary_thread = threading.Thread(
+        target=run_role_loop,
+        args=(exchange, market, symbol, PRIMARY_ROLE, primary_url, stop_event, state),
+        daemon=True,
+    )
+    backup_thread = threading.Thread(
+        target=run_role_loop,
+        args=(exchange, market, symbol, BACKUP_ROLE, backup_url, stop_event, state),
+        daemon=True,
+    )
+    primary_thread.start()
+    backup_thread.start()
+    primary_thread.join()
+    backup_thread.join()
     status_update(exchange, market, symbol, None)
-    log(f"{exchange} {market} {symbol} 订阅停止", market)
+    log(f"{exchange} {market} {symbol} 主备订阅停止", market)
 
 
 def run_exchange_supervisor(exchange: str, market: str) -> None:

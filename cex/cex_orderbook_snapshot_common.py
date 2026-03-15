@@ -36,14 +36,17 @@ DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")  # 日期格式正则，正则
 BATCH_SIZE = 20000  # Parquet批次大小，条
 SMALL_BATCH_SIZE = 100  # 超大深度Parquet批次大小，条
 QUIET = False  # 静默模式开关，开关
+STATUS_HOOK = None  # 状态回调函数，函数
 LOG_HOOK = None  # 日志回调函数，函数
 DATASET_QUIET = {}  # 分数据集静默模式映射，映射
+DATASET_STATUS_HOOK = {}  # 分数据集状态回调映射，映射
 DATASET_LOG_HOOK = {}  # 分数据集日志回调映射，映射
 
 
-def configure_dataset_runtime(output_dataset_id: str, quiet: bool, log_hook) -> None:
+def configure_dataset_runtime(output_dataset_id: str, quiet: bool, status_hook, log_hook) -> None:
     """配置数据集运行时回调。"""
     DATASET_QUIET[output_dataset_id] = quiet
+    DATASET_STATUS_HOOK[output_dataset_id] = status_hook
     DATASET_LOG_HOOK[output_dataset_id] = log_hook
 
 
@@ -55,6 +58,15 @@ def log(output_dataset_id: str, message: str) -> None:
         log_hook(message)
     if not quiet:
         print(message)
+
+
+def status_update(output_dataset_id: str, exchange: str, symbol: str, value) -> None:
+    """更新指定数据集的状态信息。"""
+    hook = DATASET_STATUS_HOOK.get(output_dataset_id, STATUS_HOOK)
+    if not hook:
+        return
+    market = "future" if output_dataset_id == "D10011" else "spot"
+    hook(cex_config.get_status_key(exchange, market, symbol), value)
 
 
 def list_input_symbols(base_dir: Path) -> list[str]:
@@ -405,6 +417,22 @@ def parse_date_from_name(input_dataset_id: str, exchange: str, file_name: str, s
     return date_text if DATE_PATTERN.fullmatch(date_text) else None
 
 
+def processed_dates_for_symbol(
+    input_dataset_id: str,
+    exchange: str,
+    output_dir: Path,
+    symbol: str,
+    candidate_dates: list[str],
+) -> set[str]:
+    """统计指定交易对已处理完成的日期集合。"""
+    processed = set()
+    for date_str in candidate_dates:
+        output_path = build_output_path(input_dataset_id, exchange, output_dir, symbol, date_str)
+        if storage_file_exists(output_path):
+            processed.add(date_str)
+    return processed
+
+
 def iter_available_dates(input_dataset_id: str, exchange: str, input_dir: Path, symbol: str, start_date: str) -> list[str]:
     """遍历某个交易对可处理的日期。"""
     dates = set()
@@ -425,8 +453,26 @@ def run_dataset(input_dataset_id: str, output_dataset_id: str) -> None:
             if not input_dir or not output_dir or not start_date:
                 continue
             for symbol in resolve_symbols(input_dataset_id, exchange, input_dir):
-                for date_str in iter_available_dates(input_dataset_id, exchange, input_dir, symbol, start_date):
+                available_dates = iter_available_dates(input_dataset_id, exchange, input_dir, symbol, start_date)
+                if not available_dates:
+                    status_update(output_dataset_id, exchange, symbol, (0, "无可处理数据"))
+                    continue
+                processed_dates = processed_dates_for_symbol(input_dataset_id, exchange, output_dir, symbol, available_dates)
+                done_count = len(processed_dates)
+                synced_until = cex_config.get_min_start_date(input_dataset_id, exchange)
+                if processed_dates:
+                    synced_until = max(processed_dates)
+                    status_update(output_dataset_id, exchange, symbol, (done_count, f"日 {synced_until} 准备回补"))
+                else:
+                    status_update(output_dataset_id, exchange, symbol, (0, f"准备 {available_dates[0]}"))
+                for date_str in available_dates:
+                    if date_str in processed_dates:
+                        continue
+                    status_update(output_dataset_id, exchange, symbol, (done_count, f"日 {date_str} 请求中"))
                     process_date(input_dataset_id, output_dataset_id, exchange, input_dir, output_dir, symbol, date_str)
+                    done_count += 1
+                    output_name = build_output_path(input_dataset_id, exchange, output_dir, symbol, date_str).name
+                    status_update(output_dataset_id, exchange, symbol, (done_count, f"日 {date_str} {output_name}"))
         sleep_seconds = seconds_until_next_utc_midnight()
         log(output_dataset_id, f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
         time.sleep(sleep_seconds)

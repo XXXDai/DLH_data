@@ -327,9 +327,18 @@ def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr
     file_names = snapshot["file_names"] or ["当前无活跃上传"]
     row = content_row + 1
     for file_name in file_names:
-        if row >= footer_row - 1:
+        if row >= footer_row - 3:
             break
         draw_clipped_text(stdscr, row, 0, f"- {file_name}", max_cols - 1, title_attr if file_name != "当前无活跃上传" else 0)
+        row += 1
+    if row < footer_row - 2:
+        draw_clipped_text(stdscr, row, 0, "待上传前15个", max_cols - 1, header_attr)
+        row += 1
+    pending_file_names = snapshot["pending_file_names"] or ["当前无待上传文件"]
+    for file_name in pending_file_names:
+        if row >= footer_row - 1:
+            break
+        draw_clipped_text(stdscr, row, 0, f"- {file_name}", max_cols - 1, 0 if file_name == "当前无待上传文件" else title_attr)
         row += 1
 
 
@@ -444,7 +453,7 @@ def sync_text_sort_key(text: str) -> str:
 
 def get_synced_until_text(task_id: str, bucket: dict) -> str:
     """返回任务当前已同步到的日期文本。"""
-    if task_id not in {"D10001", "D10005", "D10013", "D10014", "D10017", "D10018", "D10019"}:
+    if task_id not in {"D10001", "D10005", "D10011", "D10012", "D10013", "D10014", "D10017", "D10018", "D10019"}:
         return "-"
     latest_text = ""
     for value in bucket.values():
@@ -620,12 +629,67 @@ class ErrorLogger:
             self.trace_remaining[task_id] = 200
 
 
-def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, dict, dict]:
+def update_startup_progress(startup_progress: dict | None, phase: str, current: int, total: int, detail: str) -> None:
+    """更新启动阶段进度。"""
+    if startup_progress is None:
+        return
+    startup_progress["phase"] = phase
+    startup_progress["current"] = current
+    startup_progress["total"] = total
+    startup_progress["detail"] = detail
+    startup_progress["updated_at"] = time.time()
+
+
+def format_startup_progress_line(startup_progress: dict, max_cols: int) -> str:
+    """格式化启动阶段进度文本。"""
+    total = int(startup_progress.get("total") or 0)
+    current = int(startup_progress.get("current") or 0)
+    phase = str(startup_progress.get("phase") or "准备启动")
+    detail = str(startup_progress.get("detail") or "-")
+    if total > 0:
+        text = f"{phase} {current}/{total} | {detail}"
+    else:
+        text = f"{phase} | {detail}"
+    return truncate_by_cells(text, max_cols)
+
+
+def render_pre_tui(startup_progress: dict) -> None:
+    """在正式TUI前输出启动进度。"""
+    max_cols = 120
+    lines = []
+    lines.append("DLH Data | 启动中")
+    lines.append("")
+    lines.append(format_startup_progress_line(startup_progress, max_cols))
+    if app_config.DATA_STORAGE_MODE == "s3":
+        snapshot = cex_common.get_upload_startup_snapshot()
+        sync_total = int(snapshot.get("total") or 0)
+        sync_current = int(snapshot.get("current") or 0)
+        sync_file = str(snapshot.get("file_name") or "-")
+        sync_phase = str(snapshot.get("phase") or "未开始")
+        sync_queued = int(snapshot.get("queued") or 0)
+        sync_deleted = int(snapshot.get("deleted") or 0)
+        if sync_total > 0:
+            lines.append(f"S3启动扫描 {sync_current}/{sync_total} | {sync_phase}")
+        else:
+            lines.append(f"S3启动扫描 | {sync_phase}")
+        lines.append(f"当前文件: {sync_file}")
+        lines.append(f"已入队: {sync_queued} | 已清理: {sync_deleted}")
+    else:
+        lines.append("S3启动扫描 | 本地模式")
+    text = "\033[2J\033[H" + "\n".join(lines) + "\n"
+    sys.__stdout__.write(text)
+    sys.__stdout__.flush()
+
+
+def start_tasks(selected: list | None = None, startup_progress: dict | None = None) -> tuple[list, dict, dict, dict, dict, dict]:
+    """启动全部任务并返回运行时容器。"""
+    update_startup_progress(startup_progress, "加载任务定义", 0, len(TASK_DEFS), "准备构建任务列表")
     tasks = filter_tasks(build_tasks(), selected or app_config.START_TASKS)
     if not tasks:
         print("未配置启动任务")
         return [], {}, {}, {}, {}, {}
     if app_config.DATA_STORAGE_MODE == "s3":
+        update_startup_progress(startup_progress, "初始化上传池", 0, len(tasks), "准备检查S3启动状态")
         cex_common.ensure_upload_workers_started()
     status_counts = {}
     status_times = {}
@@ -667,8 +731,10 @@ def start_tasks(selected: list | None = None) -> tuple[list, dict, dict, dict, d
                 bucket["写入"] = int(bucket.get("写入") or 0) + 1
         return hook
 
-    for task in tasks:
+    for index, task in enumerate(tasks, start=1):
+        update_startup_progress(startup_progress, "启动任务", index, len(tasks), task.name)
         task.start(thread_task_map, True, make_hook(task.task_id), make_log_hook(task.task_id))
+    update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "准备进入界面")
     return tasks, status_counts, status_times, status_meta, logs, pending
 
 
@@ -879,7 +945,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 draw_clipped_text(stdscr, detail_subheader_row, log_col, schedule_header, log_width, warm_attr)
             status_items = []
             ws_tasks = {"D10002-4", "D10006-8", "D10022-23"}
-            if current.task_id in {"D10001", "D10005", "D10013", "D10014", "D10017", "D10018", "D10019", "D10002-4", "D10006-8"}:
+            if current.task_id in {"D10001", "D10005", "D10011", "D10012", "D10013", "D10014", "D10017", "D10018", "D10019", "D10002-4", "D10006-8"}:
                 counts = get_status_bucket_for_exchange(current.task_id, current_exchange, status_counts)
                 numeric_total = get_total_count(counts)
                 if current.task_id in {"D10002-4", "D10006-8"}:
@@ -887,12 +953,12 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 elif current.task_id in {"D10017", "D10018", "D10019"}:
                     title = "同步状态"
                 else:
-                    title = f"下载状态（已同步天数总计: {numeric_total}）"
+                    title = f"处理状态（已同步天数总计: {numeric_total}）" if current.task_id in {"D10011", "D10012"} else f"下载状态（已同步天数总计: {numeric_total}）"
                 for key in sorted(counts):
                     value = counts[key]
                     display_key = simplify_status_key(current_exchange, key)
                     if (
-                        current.task_id in {"D10001", "D10005", "D10013", "D10014"}
+                        current.task_id in {"D10001", "D10005", "D10011", "D10012", "D10013", "D10014"}
                         and isinstance(value, tuple)
                         and len(value) >= 2
                         and isinstance(value[0], (int, float))
@@ -917,7 +983,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 available = log_width
                 total = len(status_items)
                 status_header = None
-                if current.task_id in {"D10001", "D10005", "D10013", "D10014"}:
+                if current.task_id in {"D10001", "D10005", "D10011", "D10012", "D10013", "D10014"}:
                     status_header = ("对象", "已同步天数", "阶段", "当前", "说明")
                 header_rows = 1 if status_header else 0
                 max_status_rows = max(0, min(total, max(4, detail_height // 2)))
@@ -1097,7 +1163,30 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
 
 
 def main() -> None:
-    tasks, status_counts, status_times, status_meta, logs, pending = start_tasks()
+    """启动任务并进入TUI。"""
+    startup_progress = {
+        "phase": "准备启动",
+        "current": 0,
+        "total": 0,
+        "detail": "-",
+        "updated_at": time.time(),
+        "result": None,
+    }
+
+    def bootstrap() -> None:
+        """在后台执行启动流程。"""
+        startup_progress["result"] = start_tasks(startup_progress=startup_progress)
+
+    bootstrap_thread = threading.Thread(target=bootstrap, name="launcher-bootstrap", daemon=True)
+    bootstrap_thread.start()
+    while bootstrap_thread.is_alive():
+        render_pre_tui(startup_progress)
+        time.sleep(app_config.TUI_REFRESH_SECONDS)
+    if startup_progress["result"] is None:
+        raise RuntimeError("启动失败，未能生成任务列表")
+    render_pre_tui(startup_progress)
+    time.sleep(app_config.TUI_REFRESH_SECONDS)
+    tasks, status_counts, status_times, status_meta, logs, pending = startup_progress["result"]
     if tasks:
         curses.wrapper(run_tui, tasks, status_counts, status_times, status_meta, logs, pending)
         os._exit(0)
