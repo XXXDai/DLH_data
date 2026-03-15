@@ -419,6 +419,32 @@ def s3_object_exists(file_path: Path) -> bool:
         raise RuntimeError(f"S3检查失败: {code or '未知错误'}") from exc
 
 
+def list_all_s3_keys_under_data_root() -> set[str]:
+    """列出数据根目录下所有S3对象键。"""
+    prefix = f"{app_config.S3_PREFIX}/"
+    keys = set()
+    try:
+        paginator = get_s3_client().get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=app_config.S3_BUCKET_NAME, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = str(item.get("Key") or "")
+                if key and not key.endswith("/"):
+                    keys.add(key)
+        return keys
+    except NoCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 缺少凭证") from exc
+    except PartialCredentialsError as exc:
+        raise RuntimeError("S3检查失败: 凭证不完整") from exc
+    except ConnectTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 连接超时") from exc
+    except ReadTimeoutError as exc:
+        raise RuntimeError("S3检查失败: 读取超时") from exc
+    except EndpointConnectionError as exc:
+        raise RuntimeError("S3检查失败: 无法连接S3端点") from exc
+    except ClientError as exc:
+        raise RuntimeError(f"S3检查失败: {exc.response.get('Error', {}).get('Code', '未知错误')}") from exc
+
+
 def sync_local_files_to_s3_on_startup() -> None:
     """启动时按S3现状补传并清理本地文件。"""
     global UPLOAD_STARTUP_SYNC_DONE
@@ -437,11 +463,14 @@ def sync_local_files_to_s3_on_startup() -> None:
     queued_count = 0
     deleted_count = 0
     update_upload_startup_status("扫描本地文件", 0, len(local_files), "-", queued_count, deleted_count, False)
+    update_upload_startup_status("拉取S3文件列表", 0, len(local_files), "-", queued_count, deleted_count, False)
+    existing_s3_keys = list_all_s3_keys_under_data_root()
     for index, file_path in enumerate(local_files, start=1):
         update_upload_startup_status("检查S3现状", index, len(local_files), file_path.name, queued_count, deleted_count, False)
         if file_path.name.endswith(".part"):
             continue
-        if s3_object_exists(file_path):
+        s3_key = build_s3_key(file_path)
+        if s3_key and s3_key in existing_s3_keys:
             file_path.unlink()
             deleted_count += 1
             update_upload_startup_status("删除本地已同步文件", index, len(local_files), file_path.name, queued_count, deleted_count, False)

@@ -41,7 +41,7 @@ def list_input_symbols(base_dir: Path) -> list:
     """列出输入目录内的交易对。"""
     if not base_dir.exists():
         return []
-    return sorted([path.name for path in base_dir.iterdir() if path.is_dir()])
+    return sorted([path.name for path in base_dir.iterdir() if path.is_dir() and not path.name.startswith("__")])
 
 
 def resolve_symbols(exchange: str, base_dir: Path) -> list:
