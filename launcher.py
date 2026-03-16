@@ -914,7 +914,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if status == cex_config.UNSUPPORTED_STATUS_TEXT:
                 status_attr = header_attr
             else:
-                status_attr = ok_attr if task.is_running() else bad_attr
+                if task.is_attached():
+                    parent_task = task_map.get(ATTACHED_TASK_PARENTS[task.task_id])
+                    status_attr = ok_attr if parent_task and parent_task.is_running() else bad_attr
+                else:
+                    status_attr = ok_attr if task.is_running() else bad_attr
             draw_clipped_text(stdscr, row, 0, ">" if item_index == task_selected[current_exchange] else " ", 1, selected_attr)
             draw_clipped_text(stdscr, row, 2, pad_to_cells(task.name, name_cells), name_cells, selected_attr)
             draw_clipped_text(stdscr, row, 2 + name_cells + 1, pad_to_cells(status, 6), 6, selected_attr | status_attr)
