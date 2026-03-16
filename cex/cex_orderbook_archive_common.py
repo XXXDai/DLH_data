@@ -269,6 +269,8 @@ def download_okx_normalized(url: str, output_path: Path, symbol: str) -> tuple[b
     """下载并归一化OKX订单簿归档。"""
     raw_tmp_path = output_path.with_name(output_path.name + ".tar.gz.part")
     zip_tmp_path = build_part_path(output_path)
+    raw_tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    zip_tmp_path.parent.mkdir(parents=True, exist_ok=True)
     last_error = ""
     for attempt in range(1, RETRY_TIMES + 1):
         try:
