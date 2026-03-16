@@ -523,9 +523,14 @@ def build_task_map(tasks: list[Task]) -> dict[str, Task]:
 
 
 def filter_tasks(tasks: list, selected: list) -> list:
+    """按选择列表过滤任务并补齐附属父任务。"""
     if not selected:
         return tasks
     selected_set = {item.strip() for item in selected if item.strip()}
+    for task_id in list(selected_set):
+        parent_task_id = ATTACHED_TASK_PARENTS.get(task_id)
+        if parent_task_id:
+            selected_set.add(parent_task_id)
     return [task for task in tasks if task.task_id in selected_set]
 
 
@@ -745,11 +750,22 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
                 bucket["写入"] = int(bucket.get("写入") or 0) + 1
         return hook
 
+    task_hooks = {task.task_id: (make_hook(task.task_id), make_log_hook(task.task_id)) for task in tasks}
+
+    for task in tasks:
+        if task.task_id == "D10001" and task.module:
+            task.module.ATTACHED_STATUS_HOOKS = {"D10011": task_hooks.get("D10011", (None, None))[0]}
+            task.module.ATTACHED_LOG_HOOKS = {"D10011": task_hooks.get("D10011", (None, None))[1]}
+        if task.task_id == "D10005" and task.module:
+            task.module.ATTACHED_STATUS_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[0]}
+            task.module.ATTACHED_LOG_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[1]}
+
     for index, task in enumerate(tasks, start=1):
         update_startup_progress(startup_progress, "启动任务", index, len(tasks), task.name)
         if task.is_attached():
             continue
-        task.start(thread_task_map, True, make_hook(task.task_id), make_log_hook(task.task_id))
+        status_hook, log_hook = task_hooks[task.task_id]
+        task.start(thread_task_map, True, status_hook, log_hook)
     update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "准备进入界面")
     return tasks, status_counts, status_times, status_meta, logs, pending
 

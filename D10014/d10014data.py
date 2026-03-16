@@ -9,11 +9,13 @@ DATE = "2026-02-10"  # 数据日期，日期
 
 
 def build_file_path(base_dir: Path, symbol: str, date_str: str) -> Path:
+    """构造成交文件路径。"""
     file_name = f"{symbol}_{date_str}.csv.gz"
     return base_dir / symbol / file_name
 
 
 def iter_trades(file_path: Path, size_key: str):
+    """遍历压缩成交记录。"""
     with gzip.open(file_path, "rt", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
@@ -27,6 +29,7 @@ def iter_trades(file_path: Path, size_key: str):
 
 
 def detect_size_key(file_path: Path) -> str:
+    """识别成交数量字段。"""
     with gzip.open(file_path, "rt", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
@@ -38,6 +41,7 @@ def detect_size_key(file_path: Path) -> str:
 
 
 def format_datetime(ts: float | None) -> str:
+    """格式化UTC时间。"""
     if ts is None:
         return "无"
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -45,11 +49,21 @@ def format_datetime(ts: float | None) -> str:
 
 
 def parse_ts_seconds(ts_text: str) -> float:
+    """将秒或毫秒时间戳转成秒。"""
     ts_value = float(ts_text)
     return ts_value / 1000 if ts_value > 1e12 else ts_value
 
 
+def parse_foreign_value(row: dict, size_key: str) -> float:
+    """解析成交额字段。"""
+    foreign_text = row.get("foreignNotional") or row.get("grossValue")
+    if foreign_text not in {None, ""}:
+        return float(foreign_text)
+    return float(row["price"]) * float(row[size_key])
+
+
 def aggregate_trades(file_path: Path) -> dict:
+    """聚合单日成交统计。"""
     size_key = detect_size_key(file_path)
     total = 0
     size_sum = 0.0
@@ -61,7 +75,7 @@ def aggregate_trades(file_path: Path) -> dict:
         total += 1
         ts = parse_ts_seconds(row["timestamp"])
         size = float(row[size_key])
-        foreign = float(row["foreignNotional"])
+        foreign = parse_foreign_value(row, size_key)
         min_ts = ts if min_ts is None else min(min_ts, ts)
         max_ts = ts if max_ts is None else max(max_ts, ts)
         size_sum += size
@@ -82,13 +96,7 @@ def aggregate_trades(file_path: Path) -> dict:
 
 
 def read_date_range(symbol: str, start_date: str, end_date: str) -> dict:
-    """
-    读取指定日期范围的成交数据
-    Args:
-        symbol: 交易对，如 'BTCUSDT'
-        start_date: 开始日期，如 '2025-01-01'
-        end_date: 结束日期，如 '2025-01-05'
-    """
+    """读取指定日期范围的成交数据。"""
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
     total_stats = {
@@ -134,6 +142,7 @@ def read_date_range(symbol: str, start_date: str, end_date: str) -> dict:
 
 
 def main() -> None:
+    """运行单日成交统计示例。"""
     file_path = build_file_path(DATA_DIR, SYMBOL, DATE)
     if not file_path.exists():
         print(f"文件不存在: {file_path}")

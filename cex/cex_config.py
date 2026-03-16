@@ -333,9 +333,9 @@ def build_standard_source_dir(dataset_id: str, exchange: str) -> Path | None:
 def build_standard_output_dir(dataset_id: str, exchange: str) -> Path | None:
     """按统一命名构造输出目录。"""
     if dataset_id == "D10011":
-        return build_data_dir("dwd", f"dwd_{exchange}_future_orderbook_ss_di")
+        return build_data_dir("dwd", f"dwd_{exchange}_future_ob_ss_di")
     if dataset_id == "D10012":
-        return build_data_dir("dwd", f"dwd_{exchange}_spot_orderbook_ss_di")
+        return build_data_dir("dwd", f"dwd_{exchange}_spot_ob_ss_di")
     if dataset_id == "D10015":
         return build_data_dir("dws", f"dws_{exchange}_future_trade_1s_di")
     if dataset_id == "D10016":

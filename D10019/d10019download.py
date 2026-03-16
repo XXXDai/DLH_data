@@ -354,6 +354,11 @@ def fetch_okx_rows() -> dict:
 
 def run_bybit() -> None:
     """执行Bybit理财同步。"""
+    exchange = "bybit"
+    if not cex_config.is_supported(DATASET_ID, exchange):
+        for coin in cex_config.CEX_BASE_COINS:
+            status_update(exchange, "earn", coin, cex_config.UNSUPPORTED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, "bybit")
     rows_by_coin = fetch_bybit_rows()
     for coin in cex_config.get_earn_coins("bybit"):
@@ -466,10 +471,22 @@ def main() -> None:
             thread.start()
         for thread in threads:
             thread.join()
-        mark_missing_coins("bybit")
-        mark_missing_coins("binance")
-        mark_missing_coins("bitget")
-        mark_missing_coins("okx")
+        if cex_config.is_supported(DATASET_ID, "bybit"):
+            mark_missing_coins("bybit")
+        else:
+            mark_unsupported("bybit")
+        if cex_config.is_supported(DATASET_ID, "binance"):
+            mark_missing_coins("binance")
+        else:
+            mark_unsupported("binance")
+        if cex_config.is_supported(DATASET_ID, "bitget"):
+            mark_missing_coins("bitget")
+        else:
+            mark_unsupported("bitget")
+        if cex_config.is_supported(DATASET_ID, "okx"):
+            mark_missing_coins("okx")
+        else:
+            mark_unsupported("okx")
         sleep_seconds = seconds_until_next_utc_midnight()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
         threading.Event().wait(sleep_seconds)

@@ -36,6 +36,14 @@ def parse_ts_seconds(ts_text: str) -> float:
     return ts_value / 1000 if ts_value > 1e12 else ts_value
 
 
+def parse_foreign_value(row: dict, size: float) -> float:
+    """解析成交额字段。"""
+    foreign_text = row.get("foreignNotional") or row.get("grossValue")
+    if foreign_text not in {None, ""}:
+        return float(foreign_text)
+    return float(row["price"]) * size
+
+
 def aggregate_trades(file_path: Path) -> dict:
     """聚合单日成交统计。"""
     total = 0
@@ -48,7 +56,7 @@ def aggregate_trades(file_path: Path) -> dict:
         total += 1
         ts = parse_ts_seconds(row["timestamp"])
         size = float(row["size"])
-        foreign = float(row["foreignNotional"])
+        foreign = parse_foreign_value(row, size)
         min_ts = ts if min_ts is None else min(min_ts, ts)
         max_ts = ts if max_ts is None else max(max_ts, ts)
         size_sum += size
