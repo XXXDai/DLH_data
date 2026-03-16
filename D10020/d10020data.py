@@ -4,7 +4,7 @@ import pandas as pd
 import pyarrow.dataset as ds
 import pyarrow.compute as pc
 
-DATA_DIR = Path("data/dylan/dws/polymarket_orderbook_ss_1m_hi")  # 数据目录，路径
+DATA_DIR = Path("data/dws/dws_polymarket_orderbook_ss_1m_hi")  # 数据目录，路径
 HOUR_TAG = "2026010815"  # 目标小时，小时
 RANGE_START = "2026-01-08 15:00"  # 区间开始，日期时间
 RANGE_END = "2026-01-08 18:00"  # 区间结束，日期时间

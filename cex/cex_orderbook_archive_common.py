@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 import re
 import socket
@@ -9,7 +10,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import app_config
+import orjson
 from cex import cex_config
+from cex import cex_orderbook_snapshot_common
 from cex.cex_common import iter_dates
 from cex.cex_common import count_existing_days
 from cex.cex_common import get_synced_until_date
@@ -61,6 +64,10 @@ DATASET_IDS = {
     "future": "D10001",  # 期货订单簿数据集标识，字符串
     "spot": "D10005",  # 现货订单簿数据集标识，字符串
 }  # 市场到数据集映射，映射
+FOLLOWUP_OUTPUT_DATASET_IDS = {
+    "future": "D10011",  # 期货订单簿快照数据集标识，字符串
+    "spot": "D10012",  # 现货订单簿快照数据集标识，字符串
+}  # 市场到快照数据集映射，映射
 TIMEOUT_SECONDS = app_config.DOWNLOAD_TIMEOUT_SECONDS  # 下载超时，秒
 RETRY_TIMES = app_config.RETRY_TIMES  # 下载重试次数，次
 RETRY_INTERVAL_SECONDS = app_config.RETRY_INTERVAL_SECONDS  # 下载重试间隔，秒
@@ -100,6 +107,11 @@ def status_update(exchange: str, market: str, symbol: str, value) -> None:
 def dataset_id_for_market(market: str) -> str:
     """返回市场对应的数据集标识。"""
     return DATASET_IDS[market]
+
+
+def followup_output_dataset_id_for_market(market: str) -> str:
+    """返回市场对应的快照数据集标识。"""
+    return FOLLOWUP_OUTPUT_DATASET_IDS[market]
 
 
 def is_valid_ymd(date_text: str) -> bool:
@@ -149,6 +161,11 @@ def build_okx_file_name(market: str, symbol: str, date_str: str) -> str:
     return f"{symbol}-L2orderbook-{okx_orderbook_level_for_market(market)}-{date_str}.tar.gz"
 
 
+def build_okx_normalized_file_name(symbol: str, date_str: str) -> str:
+    """构造OKX归一化后的订单簿文件名。"""
+    return f"{date_str}_{symbol}_ob400.data.zip"
+
+
 def build_url(exchange: str, market: str, symbol: str, date_str: str) -> str:
     """构造指定交易所订单簿归档地址。"""
     if exchange == "bybit":
@@ -168,7 +185,7 @@ def build_output_path(exchange: str, market: str, base_dir: Path, symbol: str, d
         return base_dir / symbol / f"{symbol}-bookTicker-{date_str}.zip"
     if exchange == "bitget":
         return base_dir / symbol / f"{date_str.replace('-', '')}.zip"
-    return base_dir / symbol / build_okx_file_name(market, symbol, date_str)
+    return base_dir / symbol / build_okx_normalized_file_name(symbol, date_str)
 
 
 def parse_date_from_name(exchange: str, market: str, file_name: str, symbol: str) -> str | None:
@@ -194,12 +211,115 @@ def parse_date_from_name(exchange: str, market: str, file_name: str, symbol: str
             return None
         date_text = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
         return date_text if is_valid_ymd(date_text) else None
-    prefix = f"{symbol}-L2orderbook-{okx_orderbook_level_for_market(market)}-"
-    suffix = ".tar.gz"
-    if not file_name.startswith(prefix) or not file_name.endswith(suffix):
+    suffix = f"_{symbol}_ob400.data.zip"
+    if not file_name.endswith(suffix):
         return None
-    date_text = file_name[len(prefix) : -len(suffix)]
+    date_text = file_name[: -len(suffix)]
     return date_text if is_valid_ymd(date_text) else None
+
+
+def normalize_okx_levels(levels: list) -> list[list[str]]:
+    """裁剪OKX盘口字段为价格和数量。"""
+    return [[str(level[0]), str(level[1])] for level in levels if len(level) >= 2]
+
+
+def build_okx_normalized_message(symbol: str, action: str, item: dict) -> dict:
+    """构造OKX归一化后的Bybit样式消息。"""
+    ts_ms = int(item.get("ts", "0") or 0)
+    update_id = int(item.get("seqId", item.get("ts", "0")) or 0)
+    previous_id = int(item.get("prevSeqId", update_id) or update_id)
+    return {
+        "topic": f"orderbook.400.{symbol}",
+        "type": "snapshot" if action == "snapshot" else "delta",
+        "ts": ts_ms,
+        "data": {
+            "s": symbol,
+            "b": normalize_okx_levels(item.get("bids", [])),
+            "a": normalize_okx_levels(item.get("asks", [])),
+            "u": update_id,
+            "seq": previous_id,
+        },
+        "cts": ts_ms,
+    }
+
+
+def convert_okx_tar_to_zip(raw_path: Path, output_path: Path, symbol: str) -> None:
+    """将OKX原始tar归一化为Bybit样式zip。"""
+    inner_name = f"{symbol}.json"
+    with tarfile.open(raw_path, "r:gz") as tar_file, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        with zip_file.open(inner_name, "w") as zip_obj:
+            for member in tar_file.getmembers():
+                if not member.isfile():
+                    continue
+                file_obj = tar_file.extractfile(member)
+                if not file_obj:
+                    continue
+                for line in file_obj:
+                    message = orjson.loads(line)
+                    action = message.get("action", "")
+                    if action not in {"snapshot", "update"}:
+                        continue
+                    for item in message.get("data", []):
+                        normalized = build_okx_normalized_message(message.get("arg", {}).get("instId", symbol), action, item)
+                        zip_obj.write(orjson.dumps(normalized))
+                        zip_obj.write(b"\n")
+
+
+def download_okx_normalized(url: str, output_path: Path, symbol: str) -> tuple[bool, str]:
+    """下载并归一化OKX订单簿归档。"""
+    raw_tmp_path = output_path.with_name(output_path.name + ".tar.gz.part")
+    zip_tmp_path = build_part_path(output_path)
+    last_error = ""
+    for attempt in range(1, RETRY_TIMES + 1):
+        try:
+            with open_download_request("okx", url) as response:
+                if raw_tmp_path.exists():
+                    raw_tmp_path.unlink()
+                with raw_tmp_path.open("wb") as file_obj:
+                    while True:
+                        chunk = response.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        file_obj.write(chunk)
+        except HTTPError as exc:
+            if raw_tmp_path.exists():
+                raw_tmp_path.unlink()
+            if exc.code == 404:
+                return False, "HTTP 404"
+            last_error = f"HTTP {exc.code}"
+        except URLError as exc:
+            if raw_tmp_path.exists():
+                raw_tmp_path.unlink()
+            last_error = f"网络错误: {exc.reason}"
+        except TimeoutError:
+            if raw_tmp_path.exists():
+                raw_tmp_path.unlink()
+            last_error = "下载超时"
+        except socket.timeout:
+            if raw_tmp_path.exists():
+                raw_tmp_path.unlink()
+            last_error = "下载超时"
+        else:
+            if raw_tmp_path.stat().st_size == 0:
+                raw_tmp_path.unlink()
+                last_error = "下载为空"
+            elif not tarfile.is_tarfile(raw_tmp_path):
+                raw_tmp_path.unlink()
+                last_error = "归档不是有效tar.gz"
+            else:
+                if zip_tmp_path.exists():
+                    zip_tmp_path.unlink()
+                convert_okx_tar_to_zip(raw_tmp_path, zip_tmp_path, symbol)
+                raw_tmp_path.unlink()
+                if not zipfile.is_zipfile(zip_tmp_path):
+                    zip_tmp_path.unlink()
+                    last_error = "归档不是有效zip"
+                else:
+                    replace_output_file(zip_tmp_path, output_path)
+                    return True, ""
+        if attempt < RETRY_TIMES:
+            time.sleep(RETRY_INTERVAL_SECONDS)
+    return False, last_error
 
 
 def iter_symbol_paths(exchange: str, market: str, symbol_dir: Path):
@@ -213,7 +333,7 @@ def iter_symbol_paths(exchange: str, market: str, symbol_dir: Path):
     if exchange == "bitget":
         yield from symbol_dir.glob("*.zip")
         return
-    yield from symbol_dir.glob(f"*-L2orderbook-{okx_orderbook_level_for_market(market)}-*.tar.gz")
+    yield from symbol_dir.glob("*_ob400.data.zip")
 
 
 def get_latest_local_date(base_dir: Path, exchange: str, market: str, symbol: str) -> str | None:
@@ -377,12 +497,24 @@ def download_date(exchange: str, market: str, symbol: str, date_str: str) -> boo
         clear_failure(exchange, market, symbol, date_str)
         return True
     url = build_url(exchange, market, symbol, date_str)
-    ok, message = download_archive(exchange, url, output_path)
+    if exchange == "okx":
+        ok, message = download_okx_normalized(url, output_path, symbol)
+    else:
+        ok, message = download_archive(exchange, url, output_path)
     if ok:
         clear_failure(exchange, market, symbol, date_str)
         return True
     record_failure(exchange, market, symbol, date_str, message)
     return False
+
+
+def process_followup_snapshot(exchange: str, market: str, symbol: str, date_str: str) -> None:
+    """处理订单簿归档对应的快照输出。"""
+    input_dataset_id = dataset_id_for_market(market)
+    output_dataset_id = followup_output_dataset_id_for_market(market)
+    if not cex_config.is_supported(output_dataset_id, exchange):
+        return
+    cex_orderbook_snapshot_common.process_single_date(input_dataset_id, output_dataset_id, exchange, symbol, date_str)
 
 
 def iter_symbol_failures(exchange: str, market: str, symbol: str) -> list[dict]:
@@ -422,6 +554,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         status_update(exchange, market, symbol, (done_count, f"重试 {date_str} {file_name}"))
         log_market(market, f"{exchange} {market} {symbol} 重试日包: {date_str}")
         if download_date(exchange, market, symbol, date_str):
+            process_followup_snapshot(exchange, market, symbol, date_str)
             done_count += 1
             existing_dates.add(date_str)
         else:
@@ -448,6 +581,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} 请求中"))
         log_market(market, f"{exchange} {market} {symbol} 请求日包: {date_str}")
         if download_date(exchange, market, symbol, date_str):
+            process_followup_snapshot(exchange, market, symbol, date_str)
             done_count += 1
             existing_dates.add(date_str)
             status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} {file_name}"))

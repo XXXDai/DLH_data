@@ -1,7 +1,7 @@
 from pathlib import Path
 import pandas as pd
 
-DATA_DIR = Path("data/dylan/src/bybit_spot_orderbook_rt")  # 数据目录，路径
+DATA_DIR = Path("data/src/bybit_spot_orderbook_rt")  # 数据目录，路径
 SYMBOL = "BTCUSDT"  # 交易对，字符串
 HOUR = "2026021203"  # 小时分区，小时
 

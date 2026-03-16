@@ -2,7 +2,7 @@ from pathlib import Path
 import json
 import pandas as pd
 
-DATA_DIR = Path("data/dylan/src/polymarket_orderbook_rt")  # 数据目录，路径
+DATA_DIR = Path("data/src/polymarket_orderbook_rt")  # 数据目录，路径
 HOUR_TAG = "2026012110"  # 目标小时，小时
 BATCH_ID = 1  # 批次编号，编号
 

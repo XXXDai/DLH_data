@@ -31,10 +31,10 @@ from cex.cex_common import seconds_until_next_utc_4h
 from cex.cex_common import update_failure_file
 from cex.cex_common import write_gzip_csv_rows
 from cex.cex_orderbook_ws_common import NetworkRequestError
-from cex.cex_trade_common import NORMALIZED_TRADE_FIELDS
-from cex.cex_trade_common import normalize_bitget_trade_row
+from cex.cex_trade_common import SPOT_TRADE_FIELDS
+from cex.cex_trade_common import normalize_bitget_spot_trade_row
 from cex.cex_trade_common import normalize_binance_spot_parts
-from cex.cex_trade_common import normalize_okx_trade_row
+from cex.cex_trade_common import normalize_okx_spot_trade_row
 
 
 DATASET_ID = "D10014"  # 数据集标识，字符串
@@ -317,7 +317,7 @@ def write_daily_rows(base_dir: Path, symbol: str, rows_by_date: dict) -> int:
         output_path = build_output_path(base_dir, symbol, date_str)
         if output_path.exists():
             continue
-        total += write_gzip_csv_rows(output_path, NORMALIZED_TRADE_FIELDS, rows, False)
+        total += write_gzip_csv_rows(output_path, SPOT_TRADE_FIELDS, rows, False)
     return total
 
 
@@ -329,7 +329,7 @@ def append_rows_to_temp_file(file_path: Path, rows: list[dict]) -> int:
     write_header = not file_path.exists()
     mode = "at" if file_path.exists() else "wt"
     with gzip.open(file_path, mode, encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=NORMALIZED_TRADE_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=SPOT_TRADE_FIELDS)
         if write_header:
             writer.writeheader()
         for row in rows:
@@ -360,7 +360,7 @@ def split_okx_zip(content: bytes, symbol: str, base_dir: Path) -> int:
         with zf.open(name) as f:
             reader = csv.DictReader(TextIOWrapper(f, encoding="utf-8"))
             for row in reader:
-                normalized = normalize_okx_trade_row(row)
+                normalized = normalize_okx_spot_trade_row(row)
                 if normalized:
                     date_str, item = normalized
                     rows_by_date[date_str].append(item)
@@ -435,7 +435,7 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
             with zf.open(name) as f:
                 reader = csv.DictReader(TextIOWrapper(f, encoding="utf-8", newline=""))
                 for row in reader:
-                    normalized = normalize_bitget_trade_row(symbol, row)
+                    normalized = normalize_bitget_spot_trade_row(symbol, row)
                     if normalized:
                         rows.append(normalized[1])
         row_count += append_rows_to_temp_file(tmp_path, rows)

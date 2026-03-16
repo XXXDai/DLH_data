@@ -14,8 +14,6 @@ from cex import cex_common
 from cex import cex_config
 import D10001.d10001download as d10001download
 import D10005.d10005download as d10005download
-import D10011.d10011 as d10011
-import D10012.d10012 as d10012
 import D10013.d10013download as d10013download
 import D10014.d10014download as d10014download
 import D10015.d10015 as d10015
@@ -36,8 +34,8 @@ apply_storage_mode_from_argv()
 TASK_DEFS = [
     ("D10001", "D10001 下载", d10001download, None),
     ("D10005", "D10005 下载", d10005download, None),
-    ("D10011", "D10011 处理", d10011, None),
-    ("D10012", "D10012 处理", d10012, None),
+    ("D10011", "D10011 处理", None, None),
+    ("D10012", "D10012 处理", None, None),
     ("D10013", "D10013 下载", d10013download, None),
     ("D10014", "D10014 下载", d10014download, None),
     ("D10015", "D10015 处理", d10015, None),
@@ -52,6 +50,10 @@ TASK_DEFS = [
 
 TASK_LOCAL = threading.local()  # 任务线程上下文，线程
 UPLOAD_VIEW_ID = "__upload__"  # 上传管理页签标识，字符串
+ATTACHED_TASK_PARENTS = {
+    "D10011": "D10001",  # D10011附属父任务标识，字符串
+    "D10012": "D10005",  # D10012附属父任务标识，字符串
+}  # 附属任务父任务映射，映射
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -59,8 +61,8 @@ MAX_LOG_LINE_CHARS = 2000  # 单行日志最大长度，字符
 TASK_FREQUENCY = {
     "D10001": "每4小时",
     "D10005": "每4小时",
-    "D10011": "每日",
-    "D10012": "每日",
+    "D10011": "每4小时",
+    "D10012": "每4小时",
     "D10013": "每日",
     "D10014": "每4小时",
     "D10015": "每4小时",
@@ -137,6 +139,9 @@ class Task:
         self.start_time = None
 
     def start(self, thread_task_map: dict, quiet: bool, status_hook, log_hook) -> None:
+        if self.task_id in ATTACHED_TASK_PARENTS:
+            self.start_time = time.time()
+            return
         self.start_time = time.time()
         if self.module:
             if hasattr(self.module, "QUIET"):
@@ -166,6 +171,10 @@ class Task:
 
     def is_running(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
+
+    def is_attached(self) -> bool:
+        """判断是否为附属任务。"""
+        return self.task_id in ATTACHED_TASK_PARENTS
 
 
 def seconds_until_next_utc_midnight(now: datetime) -> int:
@@ -508,6 +517,11 @@ def build_tasks():
     return tasks
 
 
+def build_task_map(tasks: list[Task]) -> dict[str, Task]:
+    """构造任务标识到任务对象的映射。"""
+    return {task.task_id: task for task in tasks}
+
+
 def filter_tasks(tasks: list, selected: list) -> list:
     if not selected:
         return tasks
@@ -733,6 +747,8 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
 
     for index, task in enumerate(tasks, start=1):
         update_startup_progress(startup_progress, "启动任务", index, len(tasks), task.name)
+        if task.is_attached():
+            continue
         task.start(thread_task_map, True, make_hook(task.task_id), make_log_hook(task.task_id))
     update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "准备进入界面")
     return tasks, status_counts, status_times, status_meta, logs, pending
@@ -751,6 +767,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         curses.init_pair(3, curses.COLOR_CYAN, -1)
         curses.init_pair(4, curses.COLOR_YELLOW, -1)
     exchanges, grouped_tasks = group_tasks_by_exchange(tasks)
+    task_map = build_task_map(tasks)
     if not exchanges:
         return
     selected_exchange = 0
@@ -882,7 +899,11 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if row >= task_rule_row:
                 break
             if cex_config.is_supported(task.task_id, current_exchange):
-                status = "运行中" if task.is_running() else "已退出"
+                if task.is_attached():
+                    parent_task = task_map.get(ATTACHED_TASK_PARENTS[task.task_id])
+                    status = "运行中" if parent_task and parent_task.is_running() else "已退出"
+                else:
+                    status = "运行中" if task.is_running() else "已退出"
             else:
                 status = cex_config.UNSUPPORTED_STATUS_TEXT
             counts = get_status_bucket_for_exchange(task.task_id, current_exchange, status_counts)
@@ -936,7 +957,12 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             log_width = max_cols - 1
             if max_rows > detail_section_row and log_width > 0:
                 draw_clipped_text(stdscr, detail_section_row, log_col, f"{current_exchange.upper()} / {current.name}", log_width, header_attr)
-                if current.is_running():
+                if current.is_attached():
+                    parent_task = task_map.get(ATTACHED_TASK_PARENTS[current.task_id])
+                    task_running = bool(parent_task and parent_task.is_running())
+                else:
+                    task_running = current.is_running()
+                if task_running:
                     next_text, countdown_text = schedule_cache.get(current.task_id, ("-", "-"))
                 else:
                     next_text, countdown_text = "-", "-"

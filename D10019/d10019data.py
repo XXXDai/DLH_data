@@ -1,7 +1,7 @@
 from pathlib import Path
 import csv
 
-DATA_DIR = Path("data/dylan/src/bybit_onchainstaking_di")  # 数据目录，路径
+DATA_DIR = Path("data/src/bybit_onchainstaking_di")  # 数据目录，路径
 COIN = "ETH"  # 质押币种，字符串
 TARGET_DATE = "2026-01-20"  # 目标日期，日期
 

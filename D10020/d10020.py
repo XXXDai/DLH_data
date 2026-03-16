@@ -5,8 +5,8 @@ import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-INPUT_DIR = Path("data/dylan/src/polymarket_orderbook_rt_ss")  # 输入目录，路径
-OUTPUT_DIR = Path("data/dylan/dws/polymarket_orderbook_ss_1m_hi")  # 输出目录，路径
+INPUT_DIR = Path("data/src/polymarket_orderbook_rt_ss")  # 输入目录，路径
+OUTPUT_DIR = Path("data/dws/dws_polymarket_orderbook_ss_1m_hi")  # 输出目录，路径
 START_HOUR = "2026-02-12 00:00"  # 起始小时，日期时间
 QUIET = False  # 静默模式开关，开关
 LOG_HOOK = None  # 日志回调函数，函数

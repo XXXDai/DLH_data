@@ -95,20 +95,20 @@ def append_rows(file_path: Path, rows: list) -> int:
         writer = csv.DictWriter(
             f,
             fieldnames=[
-                "symbol",
-                "pool_type",
-                "contract_type",
-                "pool_symbol_list",
-                "pool_symbol_num",
-                "pool_balance",
-                "pool_value",
-                "coin",
                 "event_ts",
                 "event_dt",
                 "event_time",
                 "collect_ts",
                 "collect_date",
                 "collect_time",
+                "symbol",
+                "pool_type",
+                "contract_type",
+                "pool_balance",
+                "pool_value",
+                "coin",
+                "pool_symbol_list",
+                "pool_symbol_num",
             ],
         )
         if write_header:

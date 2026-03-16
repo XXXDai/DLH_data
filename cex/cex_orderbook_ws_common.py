@@ -188,8 +188,6 @@ def build_snapshot(
     best_bid = bids_sorted[0][0] if bids_sorted else None
     best_ask = asks_sorted[0][0] if asks_sorted else None
     return {
-        "exchange": exchange,
-        "market": market,
         "symbol": symbol,
         "update_type": update_type,
         "ts": ts_ms,
@@ -505,41 +503,80 @@ def ping_payload(exchange: str) -> str | None:
 def normalize_bybit_raw(message: dict, collect_ts: int, market: str, symbol: str) -> dict:
     """为Bybit原始消息补齐统一字段。"""
     payload = dict(message)
-    payload["exchange"] = "bybit"
-    payload["market"] = market
     payload["symbol"] = payload.get("data", {}).get("s", symbol)
     payload["collect_ts"] = collect_ts
     return payload
 
 
-def normalize_binance_raw(message: dict, collect_ts: int, market: str) -> dict:
-    """为Binance原始消息补齐统一字段。"""
-    payload = dict(message)
-    payload["exchange"] = "binance"
-    payload["market"] = market
-    payload["symbol"] = payload.get("s")
-    payload["collect_ts"] = collect_ts
-    return payload
+def normalize_binance_raw(message: dict, collect_ts: int, symbol: str, depth: int) -> dict:
+    """将Binance原始消息归一化为Bybit样式。"""
+    ts_ms = int(message.get("E", "0") or 0)
+    cts_ms = int(message.get("T", ts_ms) or ts_ms)
+    update_id = int(message.get("u", "0") or 0)
+    return {
+        "topic": f"orderbook.{depth}.{symbol}",
+        "symbol": symbol,
+        "type": "snapshot",
+        "ts": ts_ms,
+        "cts": cts_ms,
+        "collect_ts": collect_ts,
+        "data": {
+            "s": symbol,
+            "b": message.get("b", []),
+            "a": message.get("a", []),
+            "u": update_id,
+            "seq": update_id,
+        },
+    }
 
 
-def normalize_bitget_raw(message: dict, collect_ts: int, market: str, symbol: str) -> dict:
-    """为Bitget原始消息补齐统一字段。"""
-    payload = dict(message)
-    payload["exchange"] = "bitget"
-    payload["market"] = market
-    payload["symbol"] = payload.get("arg", {}).get("instId", symbol)
-    payload["collect_ts"] = collect_ts
-    return payload
+def normalize_bitget_raw(message: dict, item: dict, collect_ts: int, symbol: str, depth: int) -> dict:
+    """将Bitget原始消息归一化为Bybit样式。"""
+    inst_id = message.get("arg", {}).get("instId", symbol)
+    seq = int(item.get("seq", "0") or 0)
+    ts_ms = int(item.get("ts", "0") or 0)
+    action = message.get("action", "")
+    return {
+        "topic": f"orderbook.{depth}.{inst_id}",
+        "symbol": inst_id,
+        "type": "snapshot" if action == "snapshot" else "delta",
+        "ts": ts_ms,
+        "cts": ts_ms,
+        "collect_ts": collect_ts,
+        "data": {
+            "s": inst_id,
+            "b": item.get("bids", []),
+            "a": item.get("asks", []),
+            "u": seq,
+            "seq": seq,
+        },
+    }
 
 
-def normalize_okx_raw(message: dict, collect_ts: int, market: str, symbol: str) -> dict:
-    """为OKX原始消息补齐统一字段。"""
-    payload = dict(message)
-    payload["exchange"] = "okx"
-    payload["market"] = market
-    payload["symbol"] = payload.get("arg", {}).get("instId", symbol)
-    payload["collect_ts"] = collect_ts
-    return payload
+def normalize_okx_raw(message: dict, item: dict, collect_ts: int, symbol: str, depth: int) -> dict:
+    """将OKX原始消息归一化为Bybit样式。"""
+    inst_id = message.get("arg", {}).get("instId", symbol)
+    asks = normalize_okx_levels(item.get("asks", []))
+    bids = normalize_okx_levels(item.get("bids", []))
+    update_id = int(item.get("seqId", item.get("ts", "0")) or 0)
+    previous_id = int(item.get("prevSeqId", update_id) or update_id)
+    ts_ms = int(item.get("ts", "0") or 0)
+    action = message.get("action", "")
+    return {
+        "topic": f"orderbook.{depth}.{inst_id}",
+        "symbol": inst_id,
+        "type": "snapshot" if action == "snapshot" else "delta",
+        "ts": ts_ms,
+        "cts": ts_ms,
+        "collect_ts": collect_ts,
+        "data": {
+            "s": inst_id,
+            "b": bids,
+            "a": asks,
+            "u": update_id,
+            "seq": previous_id,
+        },
+    }
 
 
 def apply_bybit_message(orderbook: dict, market: str, symbol: str, message: dict, collect_ts: int, depth: int) -> tuple[dict, bool]:
@@ -579,7 +616,7 @@ def apply_binance_message(
     depth: int,
 ) -> tuple[dict, dict]:
     """处理Binance消息并生成快照。"""
-    raw_record = normalize_binance_raw(message, collect_ts, market)
+    raw_record = normalize_binance_raw(message, collect_ts, message.get("s", symbol), depth)
     replace_orderbook(orderbook, message.get("b", []), message.get("a", []))
     trim_orderbook(orderbook)
     snapshot = build_snapshot(
@@ -598,14 +635,15 @@ def apply_binance_message(
     return raw_record, snapshot
 
 
-def apply_bitget_message(orderbook: dict, market: str, symbol: str, message: dict, collect_ts: int, depth: int) -> tuple[dict, list]:
+def apply_bitget_message(orderbook: dict, market: str, symbol: str, message: dict, collect_ts: int, depth: int) -> tuple[list, list]:
     """处理Bitget消息并生成快照列表。"""
-    raw_record = normalize_bitget_raw(message, collect_ts, market, symbol)
+    raw_records = []
     if message.get("event") == "subscribe":
-        return raw_record, []
+        return raw_records, []
     action = message.get("action", "")
     snapshots = []
     for item in message.get("data", []):
+        raw_records.append(normalize_bitget_raw(message, item, collect_ts, symbol, depth))
         if action == "snapshot":
             replace_orderbook(orderbook, item.get("bids", []), item.get("asks", []))
         elif action == "update":
@@ -630,7 +668,7 @@ def apply_bitget_message(orderbook: dict, market: str, symbol: str, message: dic
                 depth,
             )
         )
-    return raw_record, snapshots
+    return raw_records, snapshots
 
 
 def normalize_okx_levels(levels: list) -> list:
@@ -638,14 +676,15 @@ def normalize_okx_levels(levels: list) -> list:
     return [[level[0], level[1]] for level in levels if len(level) >= 2]
 
 
-def apply_okx_message(orderbook: dict, market: str, symbol: str, message: dict, collect_ts: int, depth: int) -> tuple[dict, list]:
+def apply_okx_message(orderbook: dict, market: str, symbol: str, message: dict, collect_ts: int, depth: int) -> tuple[list, list]:
     """处理OKX消息并生成快照列表。"""
-    raw_record = normalize_okx_raw(message, collect_ts, market, symbol)
+    raw_records = []
     if message.get("event") == "subscribe":
-        return raw_record, []
+        return raw_records, []
     action = message.get("action", "")
     snapshots = []
     for item in message.get("data", []):
+        raw_records.append(normalize_okx_raw(message, item, collect_ts, symbol, depth))
         asks = normalize_okx_levels(item.get("asks", []))
         bids = normalize_okx_levels(item.get("bids", []))
         if action == "snapshot":
@@ -673,7 +712,7 @@ def apply_okx_message(orderbook: dict, market: str, symbol: str, message: dict, 
                 depth,
             )
         )
-    return raw_record, snapshots
+    return raw_records, snapshots
 
 
 def write_json_line(writer, payload: dict) -> None:
@@ -778,13 +817,15 @@ def run_session(exchange: str, market: str, symbol: str, role: str, ws_url: str,
             raw_record, snapshot = apply_bybit_message(orderbook, market, symbol, message, collect_ts, depth)
             if snapshot:
                 snapshots.append(snapshot)
+            raw_records = [raw_record]
         elif exchange == "binance":
             raw_record, snapshot = apply_binance_message(orderbook, market, symbol, message, collect_ts, depth)
             snapshots.append(snapshot)
+            raw_records = [raw_record]
         elif exchange == "bitget":
-            raw_record, snapshots = apply_bitget_message(orderbook, market, symbol, message, collect_ts, depth)
+            raw_records, snapshots = apply_bitget_message(orderbook, market, symbol, message, collect_ts, depth)
         else:
-            raw_record, snapshots = apply_okx_message(orderbook, market, symbol, message, collect_ts, depth)
+            raw_records, snapshots = apply_okx_message(orderbook, market, symbol, message, collect_ts, depth)
 
         active_now = is_active_role(state, role)
         if not active_now:
@@ -797,7 +838,8 @@ def run_session(exchange: str, market: str, symbol: str, role: str, ws_url: str,
         else:
             hour_str = hour_str_from_ms(collect_ts)
             rt_writer = ensure_writer(rt_dir, symbol, hour_str, rt_tag, rt_writer)
-            write_json_line(rt_writer, raw_record)
+            for raw_record in raw_records:
+                write_json_line(rt_writer, raw_record)
             for snapshot in snapshots:
                 snapshot_hour = hour_str_from_ms(snapshot["collect_ts"])
                 rt_ss_writer = ensure_writer(rt_ss_dir, symbol, snapshot_hour, rt_ss_tag, rt_ss_writer)

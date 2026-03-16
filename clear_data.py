@@ -3,7 +3,7 @@ import shutil
 import sys
 
 
-DATA_DIR = Path("data/dylan")  # 数据根目录，路径
+DATA_DIR = Path("data")  # 数据根目录，路径
 KEEP_SUBDIRS = {"src", "dwd", "dws"}  # 保留一级目录集合，个数
 
 
@@ -67,7 +67,7 @@ def main() -> None:
         for name in KEEP_SUBDIRS:
             (DATA_DIR / name).mkdir(parents=True, exist_ok=True)
         return
-    print("将清空 data/dylan/src、data/dylan/dwd、data/dylan/dws 下的所有内容")
+    print("将清空 data/src、data/dwd、data/dws 下的所有内容")
     print(f"待删除文件数: {file_count}")
     print(f"待删除目录数: {dir_count}")
     confirm = input("确认请输入 YES（大小写不敏感）: ").strip().lower()
@@ -75,7 +75,7 @@ def main() -> None:
         print("已取消")
         return
     clear_data(DATA_DIR)
-    print("已清理完成（已保留 data/dylan/src、data/dylan/dwd、data/dylan/dws 目录）")
+    print("已清理完成（已保留 data/src、data/dwd、data/dws 目录）")
 
 
 if __name__ == "__main__":

@@ -93,6 +93,9 @@ def append_rows(file_path: Path, rows: list) -> int:
         writer = csv.DictWriter(
             f,
             fieldnames=[
+                "collect_ts",
+                "collect_date",
+                "collect_time",
                 "coin",
                 "lst",
                 "apr",
@@ -101,9 +104,6 @@ def append_rows(file_path: Path, rows: list) -> int:
                 "redeem_rate",
                 "min_stake",
                 "max_stake",
-                "collect_ts",
-                "collect_date",
-                "collect_time",
             ],
         )
         if write_header:

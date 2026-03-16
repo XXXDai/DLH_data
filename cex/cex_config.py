@@ -303,11 +303,11 @@ EARN_COINS = {
     "bitget": ["BTC", "ETH", "SOL"],  # Bitget理财币种列表，个数
     "okx": ["BTC", "ETH", "SOL"],  # OKX链上币种列表，个数
 }  # 理财币种映射，映射
-DATA_DYLAN_ROOT = Path("data/dylan")  # Dylan数据根目录，路径
+DATA_DYLAN_ROOT = Path("data")  # 数据根目录，路径
 
 
 def build_data_dir(prefix: str, dataset_name: str) -> Path:
-    """构造Dylan数据目录。"""
+    """构造数据目录。"""
     return DATA_DYLAN_ROOT / prefix / dataset_name
 
 
@@ -333,13 +333,13 @@ def build_standard_source_dir(dataset_id: str, exchange: str) -> Path | None:
 def build_standard_output_dir(dataset_id: str, exchange: str) -> Path | None:
     """按统一命名构造输出目录。"""
     if dataset_id == "D10011":
-        return build_data_dir("dwd", f"{exchange}_future_ob_ss_di")
+        return build_data_dir("dwd", f"dwd_{exchange}_future_orderbook_ss_di")
     if dataset_id == "D10012":
-        return build_data_dir("dwd", f"{exchange}_spot_ob_ss_di")
+        return build_data_dir("dwd", f"dwd_{exchange}_spot_orderbook_ss_di")
     if dataset_id == "D10015":
-        return build_data_dir("dws", f"{exchange}_future_trade_1s_di")
+        return build_data_dir("dws", f"dws_{exchange}_future_trade_1s_di")
     if dataset_id == "D10016":
-        return build_data_dir("dws", f"{exchange}_spot_trade_1s_di")
+        return build_data_dir("dws", f"dws_{exchange}_spot_trade_1s_di")
     return None
 
 

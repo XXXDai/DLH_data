@@ -13,7 +13,7 @@ from cex import cex_common
 from cex import cex_config
 
 
-DATA_ROOT = Path("data/dylan/src")  # 数据根目录，路径
+DATA_ROOT = Path("data/src")  # 数据根目录，路径
 DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\d{2}[A-Z]{3}\d{2}$")  # 交割合约格式，正则
 OKX_DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\d{6}$")  # OKX交割合约格式，正则
 BITGET_ARCHIVE_NAME_PATTERN = re.compile(r"^(\d{8})_\d{3}\.zip$")  # Bitget归档文件名格式，正则
@@ -206,16 +206,11 @@ def validate_orderbook_di(
                     continue
                 date_text = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
             elif exchange == "okx":
-                level = "400lv"
-                prefix = f"{symbol}-L2orderbook-{level}-"
-                suffix = ".tar.gz"
+                suffix = f"_{symbol}_ob400.data.zip"
                 if not name.endswith(suffix):
                     report.error(f"{dataset_id} 文件后缀不符合: {file_path}")
                     continue
-                if not name.startswith(prefix):
-                    report.error(f"{dataset_id} 文件名交易对不匹配: {file_path}")
-                    continue
-                date_text = name[len(prefix) : -len(suffix)]
+                date_text = name[: -len(suffix)]
             else:
                 report.error(f"{dataset_id} 校验脚本配置错误: exchange={exchange}")
                 return
@@ -234,8 +229,8 @@ def validate_orderbook_di(
                 report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
             if exchange == "bitget" and not zipfile.is_zipfile(local_file_path):
                 report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
-            if exchange == "okx" and not tarfile.is_tarfile(local_file_path):
-                report.error(f"{dataset_id} 不是有效tar.gz文件: {file_path}")
+            if exchange == "okx" and not zipfile.is_zipfile(local_file_path):
+                report.error(f"{dataset_id} 不是有效zip文件: {file_path}")
             if has_start_date and date_text < start_date:
                 report.warn(f"{dataset_id} 发现早于配置起始日期({start_date})的数据: {file_path}")
 

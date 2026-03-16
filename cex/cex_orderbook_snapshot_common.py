@@ -114,7 +114,7 @@ def build_input_path(input_dataset_id: str, exchange: str, base_dir: Path, symbo
         return base_dir / symbol / f"{symbol}-bookTicker-{date_str}.zip"
     if exchange == "bitget":
         return base_dir / symbol / f"{date_str.replace('-', '')}.zip"
-    return base_dir / symbol / f"{symbol}-L2orderbook-{okx_orderbook_level_for_dataset(input_dataset_id)}-{date_str}.tar.gz"
+    return base_dir / symbol / f"{date_str}_{symbol}_ob400.data.zip"
 
 
 def build_output_path(input_dataset_id: str, exchange: str, base_dir: Path, symbol: str, date_str: str) -> Path:
@@ -182,6 +182,9 @@ def iter_messages(exchange: str, file_path: Path, symbol: str):
     if exchange == "bitget":
         yield from iter_bitget_messages(file_path, symbol)
         return
+    if file_path.name.endswith(".zip"):
+        yield from iter_zip_messages(file_path)
+        return
     yield from iter_tar_messages(file_path)
 
 
@@ -223,6 +226,8 @@ def normalize_message(exchange: str, msg: dict) -> tuple[str, dict] | None:
                 "a": [[msg.get("ask_price"), msg.get("ask_volume")]],
             },
         )
+    if "data" in msg and "type" in msg:
+        return msg.get("type", ""), msg.get("data", {})
     action = msg.get("action", "")
     if action not in {"snapshot", "update"}:
         return None
@@ -386,6 +391,15 @@ def process_date(input_dataset_id: str, output_dataset_id: str, exchange: str, i
     log(output_dataset_id, f"已写入: {output_path}，记录数: {total}")
 
 
+def process_single_date(input_dataset_id: str, output_dataset_id: str, exchange: str, symbol: str, date_str: str) -> None:
+    """处理单个交易对单日快照任务。"""
+    input_dir = cex_config.get_source_dir(input_dataset_id, exchange)
+    output_dir = cex_config.get_output_dir(output_dataset_id, exchange)
+    if not input_dir or not output_dir:
+        return
+    process_date(input_dataset_id, output_dataset_id, exchange, input_dir, output_dir, symbol, date_str)
+
+
 def parse_date_from_name(input_dataset_id: str, exchange: str, file_name: str, symbol: str) -> str | None:
     """从归档文件名中解析日期。"""
     if exchange == "bybit":
@@ -409,11 +423,10 @@ def parse_date_from_name(input_dataset_id: str, exchange: str, file_name: str, s
             return None
         date_text = f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
         return date_text if DATE_PATTERN.fullmatch(date_text) else None
-    prefix = f"{symbol}-L2orderbook-{okx_orderbook_level_for_dataset(input_dataset_id)}-"
-    suffix = ".tar.gz"
-    if not file_name.startswith(prefix) or not file_name.endswith(suffix):
+    suffix = f"_{symbol}_ob400.data.zip"
+    if not file_name.endswith(suffix):
         return None
-    date_text = file_name[len(prefix) : -len(suffix)]
+    date_text = file_name[: -len(suffix)]
     return date_text if DATE_PATTERN.fullmatch(date_text) else None
 
 

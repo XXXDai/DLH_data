@@ -3,7 +3,7 @@ from pathlib import Path
 import zipfile
 import orjson
 
-DATA_DIR = Path("data/dylan/src/bybit_future_orderbook_di")  # 数据目录，路径
+DATA_DIR = Path("data/src/bybit_future_orderbook_di")  # 数据目录，路径
 SYMBOL = "BTCUSDT"  # 交易对，字符串
 DATE = "2026-02-11"  # 数据日期，日期
 DEPTH = 200  # 订单簿深度，档位
