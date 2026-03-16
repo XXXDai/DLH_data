@@ -293,6 +293,30 @@ def get_upload_startup_snapshot() -> dict:
         return dict(UPLOAD_STARTUP_STATUS)
 
 
+def reset_upload_runtime() -> None:
+    """重置上传池内存状态。"""
+    global UPLOAD_WORKERS_STARTED
+    global UPLOAD_STARTUP_SYNC_DONE
+    with UPLOAD_QUEUE_LOCK:
+        UPLOAD_PENDING_PATHS.clear()
+        with UPLOAD_QUEUE.mutex:
+            UPLOAD_QUEUE.queue.clear()
+            UPLOAD_QUEUE.unfinished_tasks = 0
+            UPLOAD_QUEUE.all_tasks_done.notify_all()
+    with UPLOAD_STATUS_LOCK:
+        UPLOAD_ACTIVE_TASKS.clear()
+    with UPLOAD_STARTUP_STATUS_LOCK:
+        UPLOAD_STARTUP_STATUS["phase"] = "未开始"
+        UPLOAD_STARTUP_STATUS["current"] = 0
+        UPLOAD_STARTUP_STATUS["total"] = 0
+        UPLOAD_STARTUP_STATUS["file_name"] = "-"
+        UPLOAD_STARTUP_STATUS["queued"] = 0
+        UPLOAD_STARTUP_STATUS["deleted"] = 0
+        UPLOAD_STARTUP_STATUS["done"] = False
+    UPLOAD_WORKERS_STARTED = False
+    UPLOAD_STARTUP_SYNC_DONE = False
+
+
 def upload_file_to_s3_blocking(file_path: Path) -> None:
     """同步上传单个本地文件到S3。"""
     if not is_s3_storage_mode():

@@ -10,6 +10,7 @@ import threading
 import time
 import unicodedata
 import app_config
+import clear_data
 from cex import cex_common
 from cex import cex_config
 import D10001.d10001download as d10001download
@@ -29,6 +30,11 @@ def apply_storage_mode_from_argv() -> None:
 
 
 apply_storage_mode_from_argv()
+
+
+def has_remove_flag() -> bool:
+    """判断是否启用清理启动参数。"""
+    return "-rm" in sys.argv
 
 
 TASK_DEFS = [
@@ -659,6 +665,24 @@ def update_startup_progress(startup_progress: dict | None, phase: str, current: 
     startup_progress["updated_at"] = time.time()
 
 
+def remove_local_runtime_state(startup_progress: dict | None) -> None:
+    """清理本地数据与断点状态。"""
+    update_startup_progress(startup_progress, "清理本地缓存", 0, 1, "删除本地数据与失败记录")
+    cex_common.reset_upload_runtime()
+    clear_data.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    clear_data.clear_data(clear_data.DATA_DIR)
+    failure_paths = [
+        Path("D10001/download_failures.json"),
+        Path("D10005/download_failures.json"),
+        Path("D10013/download_failures.json"),
+        Path("D10014/download_failures.json"),
+    ]
+    for path in failure_paths:
+        if path.exists():
+            path.unlink()
+    update_startup_progress(startup_progress, "清理本地缓存", 1, 1, "已完成本地重置")
+
+
 def format_startup_progress_line(startup_progress: dict, max_cols: int) -> str:
     """格式化启动阶段进度文本。"""
     total = int(startup_progress.get("total") or 0)
@@ -1221,6 +1245,8 @@ def main() -> None:
 
     def bootstrap() -> None:
         """在后台执行启动流程。"""
+        if has_remove_flag():
+            remove_local_runtime_state(startup_progress)
         startup_progress["result"] = start_tasks(startup_progress=startup_progress)
 
     bootstrap_thread = threading.Thread(target=bootstrap, name="launcher-bootstrap", daemon=True)
