@@ -18,6 +18,7 @@ DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\d{2}[A-Z]{3}\d{2}$")  # 交割合约�
 OKX_DELIVERY_SYMBOL_PATTERN = re.compile(r".+-\d{6}$")  # OKX交割合约格式，正则
 BITGET_ARCHIVE_NAME_PATTERN = re.compile(r"^(\d{8})_\d{3}\.zip$")  # Bitget归档文件名格式，正则
 VALIDATE_CACHE_ROOT: Path | None = None  # 远端校验临时缓存目录，路径
+VALIDATE_S3_KEYS: set[str] | None = None  # S3对象键缓存集合，个数
 
 
 @dataclass
@@ -64,10 +65,45 @@ def print_progress(prefix: str, current: int, total: int, detail: str) -> None:
         print()
 
 
+def print_scan_progress(prefix: str, current: int, detail: str) -> None:
+    """打印扫描阶段进度信息。"""
+    progress_text = f"\r{prefix} 已发现 {current} 个文件 {detail}"
+    print(progress_text[:180], end="", flush=True)
+
+
+def build_s3_key_prefix(path: Path) -> str:
+    """构造目录或文件对应的S3键前缀。"""
+    absolute_path = path.resolve()
+    data_root = cex_config.DATA_DYLAN_ROOT.resolve()
+    relative_path = absolute_path.relative_to(data_root)
+    return f"{app_config.S3_PREFIX}/{relative_path.as_posix()}"
+
+
+def prefetch_storage_key_index() -> None:
+    """预拉取S3对象键索引。"""
+    global VALIDATE_S3_KEYS
+    if not cex_common.is_s3_storage_mode():
+        VALIDATE_S3_KEYS = None
+        return
+    prefix = f"{app_config.S3_PREFIX}/"
+    keys = set()
+    paginator = cex_common.get_s3_client().get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=app_config.S3_BUCKET_NAME, Prefix=prefix):
+        for item in page.get("Contents", []):
+            key = str(item.get("Key") or "")
+            if key and not key.endswith("/"):
+                keys.add(key)
+        sample_name = Path(sorted(keys)[-1]).name if keys else "-"
+        print_scan_progress("索引S3文件", len(keys), sample_name)
+    print()
+    VALIDATE_S3_KEYS = keys
+
+
 def storage_dir_exists(dir_path: Path) -> bool:
     """判断目录在当前存储模式下是否存在。"""
-    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
-        return build_cache_path(dir_path).exists()
+    if cex_common.is_s3_storage_mode() and VALIDATE_S3_KEYS is not None:
+        prefix = build_s3_key_prefix(dir_path).rstrip("/") + "/"
+        return any(key.startswith(prefix) for key in VALIDATE_S3_KEYS)
     if not cex_common.is_s3_storage_mode():
         return dir_path.exists()
     prefix = cex_common.build_s3_prefix(dir_path)
@@ -82,11 +118,17 @@ def storage_dir_exists(dir_path: Path) -> bool:
 
 def iter_storage_dirs(dir_path: Path) -> list[Path]:
     """列出当前存储模式下的直接子目录。"""
-    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
-        cache_dir = build_cache_path(dir_path)
-        if not cache_dir.exists():
-            return []
-        return sorted([dir_path / path.name for path in cache_dir.iterdir() if path.is_dir()], key=lambda path: path.name)
+    if cex_common.is_s3_storage_mode() and VALIDATE_S3_KEYS is not None:
+        prefix = build_s3_key_prefix(dir_path).rstrip("/") + "/"
+        names = set()
+        for key in VALIDATE_S3_KEYS:
+            if not key.startswith(prefix):
+                continue
+            suffix = key[len(prefix) :]
+            if "/" not in suffix:
+                continue
+            names.add(suffix.split("/", 1)[0])
+        return [dir_path / name for name in sorted(names)]
     if not cex_common.is_s3_storage_mode():
         if not dir_path.exists():
             return []
@@ -110,18 +152,24 @@ def iter_storage_dirs(dir_path: Path) -> list[Path]:
 
 def iter_storage_files(dir_path: Path) -> list[Path]:
     """列出当前存储模式下的直接子文件。"""
-    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
-        cache_dir = build_cache_path(dir_path)
-        if not cache_dir.exists():
-            return []
-        return sorted([dir_path / path.name for path in cache_dir.iterdir() if path.is_file()], key=lambda path: path.name)
+    if cex_common.is_s3_storage_mode() and VALIDATE_S3_KEYS is not None:
+        prefix = build_s3_key_prefix(dir_path).rstrip("/") + "/"
+        names = []
+        for key in VALIDATE_S3_KEYS:
+            if not key.startswith(prefix):
+                continue
+            suffix = key[len(prefix) :]
+            if "/" in suffix:
+                continue
+            names.append(dir_path / suffix)
+        return sorted(names, key=lambda path: path.name)
     return [dir_path / name for name in cex_common.list_storage_file_names(dir_path)]
 
 
 def storage_file_exists(file_path: Path) -> bool:
     """判断文件在当前存储模式下是否存在。"""
-    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
-        return build_cache_path(file_path).exists()
+    if cex_common.is_s3_storage_mode() and VALIDATE_S3_KEYS is not None:
+        return build_s3_key_prefix(file_path) in VALIDATE_S3_KEYS
     return cex_common.storage_file_exists(file_path)
 
 
@@ -143,28 +191,6 @@ def materialize_storage_file(file_path: Path) -> Path:
         Config=cex_common.get_s3_transfer_config(),
     )
     return local_path
-
-
-def prefetch_all_storage_files() -> None:
-    """将S3数据目录全部拉取到本地校验缓存。"""
-    if not cex_common.is_s3_storage_mode():
-        return
-    if VALIDATE_CACHE_ROOT is None:
-        raise RuntimeError("校验缓存目录未初始化")
-    keys = sorted(cex_common.list_all_s3_keys_under_data_root())
-    prefix = f"{app_config.S3_PREFIX}/"
-    print_progress("拉取S3文件", 0, len(keys), "准备下载")
-    for index, key in enumerate(keys, start=1):
-        suffix = key[len(prefix) :] if key.startswith(prefix) else key
-        local_path = VALIDATE_CACHE_ROOT / suffix
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        cex_common.get_s3_client().download_file(
-            app_config.S3_BUCKET_NAME,
-            key,
-            str(local_path),
-            Config=cex_common.get_s3_transfer_config(),
-        )
-        print_progress("拉取S3文件", index, len(keys), Path(suffix).name)
 
 
 def is_valid_ymd(date_text: str) -> bool:
@@ -536,11 +562,12 @@ def run_validation_step(step_state: dict, total_steps: int, label: str) -> None:
 def main() -> int:
     """执行全量数据校验。"""
     global VALIDATE_CACHE_ROOT
+    global VALIDATE_S3_KEYS
     apply_storage_mode_from_argv()
     report = Report()
     with tempfile.TemporaryDirectory(prefix="validate_data_") as temp_dir:
         VALIDATE_CACHE_ROOT = Path(temp_dir)
-        prefetch_all_storage_files()
+        prefetch_storage_key_index()
         total_steps = 7 + len(cex_config.list_exchanges()) * 2 + len(cex_config.get_supported_exchanges("D10017")) + len(cex_config.get_supported_exchanges("D10018")) + len(cex_config.get_supported_exchanges("D10019"))
         step_state = {"current": 0}
         run_validation_step(step_state, total_steps, "D10001/bybit")
@@ -700,6 +727,7 @@ def main() -> int:
                 "_onchainstaking.csv",
             )
     VALIDATE_CACHE_ROOT = None
+    VALIDATE_S3_KEYS = None
 
     print("数据校验结果")
     print(f"错误: {len(report.errors)}")
