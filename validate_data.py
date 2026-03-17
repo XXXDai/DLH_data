@@ -41,8 +41,33 @@ def apply_storage_mode_from_argv() -> None:
     app_config.DATA_STORAGE_MODE = "s3" if "-s3" in sys.argv else "local"
 
 
+def build_cache_path(storage_path: Path) -> Path:
+    """将存储路径映射到本地校验缓存路径。"""
+    if VALIDATE_CACHE_ROOT is None:
+        raise RuntimeError("校验缓存目录未初始化")
+    relative_path = storage_path.relative_to(cex_config.DATA_DYLAN_ROOT)
+    return VALIDATE_CACHE_ROOT / relative_path
+
+
+def build_progress_bar(current: int, total: int, width: int = 28) -> str:
+    """构造命令行进度条文本。"""
+    safe_total = max(1, total)
+    filled = min(width, int(width * current / safe_total))
+    return f"[{'#' * filled}{'-' * (width - filled)}]"
+
+
+def print_progress(prefix: str, current: int, total: int, detail: str) -> None:
+    """打印单行进度信息。"""
+    progress_text = f"\r{prefix} {build_progress_bar(current, total)} {current}/{total} {detail}"
+    print(progress_text[:180], end="", flush=True)
+    if current >= total:
+        print()
+
+
 def storage_dir_exists(dir_path: Path) -> bool:
     """判断目录在当前存储模式下是否存在。"""
+    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
+        return build_cache_path(dir_path).exists()
     if not cex_common.is_s3_storage_mode():
         return dir_path.exists()
     prefix = cex_common.build_s3_prefix(dir_path)
@@ -57,6 +82,11 @@ def storage_dir_exists(dir_path: Path) -> bool:
 
 def iter_storage_dirs(dir_path: Path) -> list[Path]:
     """列出当前存储模式下的直接子目录。"""
+    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
+        cache_dir = build_cache_path(dir_path)
+        if not cache_dir.exists():
+            return []
+        return sorted([dir_path / path.name for path in cache_dir.iterdir() if path.is_dir()], key=lambda path: path.name)
     if not cex_common.is_s3_storage_mode():
         if not dir_path.exists():
             return []
@@ -80,17 +110,26 @@ def iter_storage_dirs(dir_path: Path) -> list[Path]:
 
 def iter_storage_files(dir_path: Path) -> list[Path]:
     """列出当前存储模式下的直接子文件。"""
+    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
+        cache_dir = build_cache_path(dir_path)
+        if not cache_dir.exists():
+            return []
+        return sorted([dir_path / path.name for path in cache_dir.iterdir() if path.is_file()], key=lambda path: path.name)
     return [dir_path / name for name in cex_common.list_storage_file_names(dir_path)]
+
+
+def storage_file_exists(file_path: Path) -> bool:
+    """判断文件在当前存储模式下是否存在。"""
+    if cex_common.is_s3_storage_mode() and VALIDATE_CACHE_ROOT is not None:
+        return build_cache_path(file_path).exists()
+    return cex_common.storage_file_exists(file_path)
 
 
 def materialize_storage_file(file_path: Path) -> Path:
     """将当前存储模式下的文件准备到本地供校验使用。"""
     if not cex_common.is_s3_storage_mode():
         return file_path
-    if VALIDATE_CACHE_ROOT is None:
-        raise RuntimeError("校验缓存目录未初始化")
-    relative_path = file_path.relative_to(cex_config.DATA_DYLAN_ROOT)
-    local_path = VALIDATE_CACHE_ROOT / relative_path
+    local_path = build_cache_path(file_path)
     if local_path.exists():
         return local_path
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +143,28 @@ def materialize_storage_file(file_path: Path) -> Path:
         Config=cex_common.get_s3_transfer_config(),
     )
     return local_path
+
+
+def prefetch_all_storage_files() -> None:
+    """将S3数据目录全部拉取到本地校验缓存。"""
+    if not cex_common.is_s3_storage_mode():
+        return
+    if VALIDATE_CACHE_ROOT is None:
+        raise RuntimeError("校验缓存目录未初始化")
+    keys = sorted(cex_common.list_all_s3_keys_under_data_root())
+    prefix = f"{app_config.S3_PREFIX}/"
+    print_progress("拉取S3文件", 0, len(keys), "准备下载")
+    for index, key in enumerate(keys, start=1):
+        suffix = key[len(prefix) :] if key.startswith(prefix) else key
+        local_path = VALIDATE_CACHE_ROOT / suffix
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        cex_common.get_s3_client().download_file(
+            app_config.S3_BUCKET_NAME,
+            key,
+            str(local_path),
+            Config=cex_common.get_s3_transfer_config(),
+        )
+        print_progress("拉取S3文件", index, len(keys), Path(suffix).name)
 
 
 def is_valid_ymd(date_text: str) -> bool:
@@ -438,7 +499,7 @@ def validate_single_csv_per_symbol(
         if symbols and symbol not in symbol_set:
             report.error(f"{dataset_id} 发现未配置的目录: {symbol}")
         file_path = symbol_dir / f"{symbol}{file_suffix}"
-        if not cex_common.storage_file_exists(file_path):
+        if not storage_file_exists(file_path):
             report.warn(f"{dataset_id} 缺少文件: {file_path}")
             continue
         local_file_path = materialize_storage_file(file_path)
@@ -466,6 +527,12 @@ def validate_enabled_orderbook_di(
     validate_orderbook_di(report, dataset_id, data_dir, base_symbols, has_delivery, start_date, exchange)
 
 
+def run_validation_step(step_state: dict, total_steps: int, label: str) -> None:
+    """推进校验阶段进度。"""
+    step_state["current"] += 1
+    print_progress("执行校验", step_state["current"], total_steps, label)
+
+
 def main() -> int:
     """执行全量数据校验。"""
     global VALIDATE_CACHE_ROOT
@@ -473,6 +540,10 @@ def main() -> int:
     report = Report()
     with tempfile.TemporaryDirectory(prefix="validate_data_") as temp_dir:
         VALIDATE_CACHE_ROOT = Path(temp_dir)
+        prefetch_all_storage_files()
+        total_steps = 7 + len(cex_config.list_exchanges()) * 2 + len(cex_config.get_supported_exchanges("D10017")) + len(cex_config.get_supported_exchanges("D10018")) + len(cex_config.get_supported_exchanges("D10019"))
+        step_state = {"current": 0}
+        run_validation_step(step_state, total_steps, "D10001/bybit")
         validate_enabled_orderbook_di(
             report,
             "D10001/bybit",
@@ -482,6 +553,7 @@ def main() -> int:
             cex_config.get_min_start_date("D10001", "bybit"),
             "bybit",
         )
+        run_validation_step(step_state, total_steps, "D10001/okx")
         validate_enabled_orderbook_di(
             report,
             "D10001/okx",
@@ -491,6 +563,7 @@ def main() -> int:
             cex_config.get_min_start_date("D10001", "okx"),
             "okx",
         )
+        run_validation_step(step_state, total_steps, "D10001/binance")
         validate_enabled_orderbook_di(
             report,
             "D10001/binance",
@@ -500,6 +573,7 @@ def main() -> int:
             cex_config.get_min_start_date("D10001", "binance"),
             "binance",
         )
+        run_validation_step(step_state, total_steps, "D10001/bitget")
         validate_enabled_orderbook_di(
             report,
             "D10001/bitget",
@@ -509,6 +583,7 @@ def main() -> int:
             cex_config.get_min_start_date("D10001", "bitget"),
             "bitget",
         )
+        run_validation_step(step_state, total_steps, "D10005/bybit")
         validate_enabled_orderbook_di(
             report,
             "D10005/bybit",
@@ -518,6 +593,7 @@ def main() -> int:
             cex_config.get_min_start_date("D10005", "bybit"),
             "bybit",
         )
+        run_validation_step(step_state, total_steps, "D10005/okx")
         validate_enabled_orderbook_di(
             report,
             "D10005/okx",
@@ -527,6 +603,7 @@ def main() -> int:
             cex_config.get_min_start_date("D10005", "okx"),
             "okx",
         )
+        run_validation_step(step_state, total_steps, "D10005/bitget")
         validate_enabled_orderbook_di(
             report,
             "D10005/bitget",
@@ -537,6 +614,7 @@ def main() -> int:
             "bitget",
         )
         for exchange in cex_config.list_exchanges():
+            run_validation_step(step_state, total_steps, f"D10013/{exchange}")
             data_dir = cex_config.get_source_dir("D10013", exchange)
             if not data_dir:
                 continue
@@ -561,6 +639,7 @@ def main() -> int:
                     "concat",
                 )
         for exchange in cex_config.list_exchanges():
+            run_validation_step(step_state, total_steps, f"D10014/{exchange}")
             data_dir = cex_config.get_source_dir("D10014", exchange)
             if not data_dir:
                 continue
@@ -585,6 +664,7 @@ def main() -> int:
                     "underscore",
                 )
         for exchange in cex_config.get_supported_exchanges("D10017"):
+            run_validation_step(step_state, total_steps, f"D10017/{exchange}")
             data_dir = cex_config.get_source_dir("D10017", exchange)
             if not data_dir:
                 continue
@@ -596,6 +676,7 @@ def main() -> int:
                 "_fundingrate.csv",
             )
         for exchange in cex_config.get_supported_exchanges("D10018"):
+            run_validation_step(step_state, total_steps, f"D10018/{exchange}")
             data_dir = cex_config.get_source_dir("D10018", exchange)
             if not data_dir:
                 continue
@@ -607,6 +688,7 @@ def main() -> int:
                 "_insurance.csv",
             )
         for exchange in cex_config.get_supported_exchanges("D10019"):
+            run_validation_step(step_state, total_steps, f"D10019/{exchange}")
             data_dir = cex_config.get_source_dir("D10019", exchange)
             if not data_dir:
                 continue
