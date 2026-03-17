@@ -40,6 +40,49 @@ def has_remove_flag() -> bool:
     return "-rm" in sys.argv
 
 
+def resolve_process_cwd(pid: int) -> str:
+    """解析目标进程的工作目录。"""
+    proc_cwd_path = Path(f"/proc/{pid}/cwd")
+    if proc_cwd_path.exists():
+        return str(proc_cwd_path.resolve())
+    cwd_result = subprocess.run(
+        ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cwd_lines = [item[1:] for item in cwd_result.stdout.splitlines() if item.startswith("n")]
+    return str(Path(cwd_lines[0]).resolve()) if cwd_lines else ""
+
+
+def list_other_launcher_processes() -> list[str]:
+    """列出当前项目目录下的其他launcher进程。"""
+    current_cwd = str(Path.cwd().resolve())
+    current_pid = os.getpid()
+    result = subprocess.run(
+        ["ps", "-eo", "pid=,args="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    processes = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or "launcher.py" not in stripped or "python" not in stripped:
+            continue
+        parts = stripped.split(maxsplit=1)
+        if not parts or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        if pid == current_pid:
+            continue
+        process_cwd = resolve_process_cwd(pid)
+        if process_cwd != current_cwd:
+            continue
+        processes.append(stripped)
+    return processes
+
+
 def handle_sigint(_signum, _frame) -> None:
     """统一处理Ctrl+C退出，直接结束整个进程。"""
     sys.__stdout__.write("\n")
@@ -760,9 +803,6 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
     if not tasks:
         print("未配置启动任务")
         return [], {}, {}, {}, {}, {}
-    if app_config.DATA_STORAGE_MODE == "s3":
-        update_startup_progress(startup_progress, "初始化上传池", 0, len(tasks), "准备检查S3启动状态")
-        cex_common.ensure_upload_workers_started()
     status_counts = {}
     status_times = {}
     status_meta = {}
@@ -823,42 +863,6 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             task.module.ATTACHED_STATUS_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[0]}
             task.module.ATTACHED_LOG_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[1]}
 
-    def list_other_launcher_processes() -> list[str]:
-        """列出当前机器上其他launcher进程。"""
-        current_cwd = str(Path.cwd().resolve())
-        result = subprocess.run(
-            ["ps", "-eo", "pid=,args="],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        current_pid = os.getpid()
-        processes = []
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if not stripped or "launcher.py" not in stripped or "python" not in stripped:
-                continue
-            parts = stripped.split(maxsplit=1)
-            if not parts or not parts[0].isdigit():
-                continue
-            pid = int(parts[0])
-            if pid == current_pid:
-                continue
-            cwd_result = subprocess.run(
-                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            cwd_lines = [item[1:] for item in cwd_result.stdout.splitlines() if item.startswith("n")]
-            if not cwd_lines:
-                continue
-            process_cwd = str(Path(cwd_lines[0]).resolve())
-            if process_cwd != current_cwd:
-                continue
-            processes.append(stripped)
-        return processes
-
     def start_task_list(task_list: list[Task]) -> None:
         """启动一组任务。"""
         for task in task_list:
@@ -871,6 +875,9 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         """等待旧版本退出后切换WS并启动剩余任务。"""
         while list_other_launcher_processes():
             time.sleep(app_config.OLD_LAUNCHER_CHECK_INTERVAL_SECONDS)
+        if app_config.DATA_STORAGE_MODE == "s3":
+            update_startup_progress(startup_progress, "初始化上传池", 0, len(tasks), "旧版本已退出，开始检查S3启动状态")
+            cex_common.ensure_upload_workers_started()
         if any(task.task_id == "D10002-4" for task in tasks):
             cex_orderbook_ws_common.set_market_write_enabled("future", True)
             cex_orderbook_ws_common.flush_market_buffer("future")
@@ -914,6 +921,9 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         update_startup_progress(startup_progress, "启动完成", len(immediate_tasks), len(tasks), "WS已启动，等待旧版本退出后切换")
         return tasks, status_counts, status_times, status_meta, logs, pending
 
+    if app_config.DATA_STORAGE_MODE == "s3":
+        update_startup_progress(startup_progress, "初始化上传池", 0, len(tasks), "准备检查S3启动状态")
+        cex_common.ensure_upload_workers_started()
     for index, task in enumerate(tasks, start=1):
         update_startup_progress(startup_progress, "启动任务", index, len(tasks), task.name)
     start_task_list(tasks)
