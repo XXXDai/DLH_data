@@ -431,9 +431,22 @@ def split_status_bucket_by_exchange(bucket: dict, exchange: str) -> tuple[dict, 
 
 def get_status_bucket_for_exchange(task_id: str, exchange: str, status_counts: dict) -> dict:
     """返回当前交易所应显示的状态桶。"""
+    if not cex_config.is_supported(task_id, exchange):
+        return {}
     bucket = status_counts.get(task_id, {})
     exchange_bucket, shared_bucket = split_status_bucket_by_exchange(bucket, exchange)
+    if task_id in {"D10015", "D10016"}:
+        return exchange_bucket
     return exchange_bucket if exchange_bucket else shared_bucket
+
+
+def extract_exchange_from_log(message: str) -> str | None:
+    """从日志前缀中提取交易所名称。"""
+    lowered = message.lower().lstrip()
+    for exchange in cex_config.list_exchanges():
+        if lowered.startswith(exchange):
+            return exchange
+    return None
 
 
 def get_total_count(bucket: dict) -> int:
@@ -776,7 +789,12 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             status_times[task_id] = time.time()
             if "已写入:" in message:
                 bucket = status_counts.setdefault(task_id, {})
-                bucket["写入"] = int(bucket.get("写入") or 0) + 1
+                exchange = extract_exchange_from_log(message)
+                if exchange:
+                    key = f"{exchange}/写入"
+                else:
+                    key = "写入"
+                bucket[key] = int(bucket.get(key) or 0) + 1
         return hook
 
     def log_to_task(task_id: str, message: str) -> None:
