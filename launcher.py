@@ -5,6 +5,7 @@ import curses
 import math
 import os
 import runpy
+import subprocess
 import sys
 import threading
 import time
@@ -13,6 +14,7 @@ import app_config
 import clear_data
 from cex import cex_common
 from cex import cex_config
+from cex import cex_orderbook_ws_common
 import D10001.d10001download as d10001download
 import D10005.d10005download as d10005download
 import D10013.d10013download as d10013download
@@ -60,6 +62,7 @@ ATTACHED_TASK_PARENTS = {
     "D10011": "D10001",  # D10011附属父任务标识，字符串
     "D10012": "D10005",  # D10012附属父任务标识，字符串
 }  # 附属任务父任务映射，映射
+WS_TASK_IDS = {"D10002-4", "D10006-8"}  # WS任务标识集合，个数
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -143,8 +146,10 @@ class Task:
         self.script_path = script_path
         self.thread = None
         self.start_time = None
+        self.waiting_start = False
 
     def start(self, thread_task_map: dict, quiet: bool, status_hook, log_hook) -> None:
+        self.waiting_start = False
         if self.task_id in ATTACHED_TASK_PARENTS:
             self.start_time = time.time()
             return
@@ -774,6 +779,11 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
                 bucket["写入"] = int(bucket.get("写入") or 0) + 1
         return hook
 
+    def log_to_task(task_id: str, message: str) -> None:
+        logs[task_id].append(message)
+        error_logger.write(task_id, message)
+        status_times[task_id] = time.time()
+
     task_hooks = {task.task_id: (make_hook(task.task_id), make_log_hook(task.task_id)) for task in tasks}
 
     for task in tasks:
@@ -784,12 +794,100 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             task.module.ATTACHED_STATUS_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[0]}
             task.module.ATTACHED_LOG_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[1]}
 
+    def list_other_launcher_processes() -> list[str]:
+        """列出当前机器上其他launcher进程。"""
+        current_cwd = str(Path.cwd().resolve())
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        current_pid = os.getpid()
+        processes = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped or "launcher.py" not in stripped or "python" not in stripped:
+                continue
+            parts = stripped.split(maxsplit=1)
+            if not parts or not parts[0].isdigit():
+                continue
+            pid = int(parts[0])
+            if pid == current_pid:
+                continue
+            cwd_result = subprocess.run(
+                ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            cwd_lines = [item[1:] for item in cwd_result.stdout.splitlines() if item.startswith("n")]
+            if not cwd_lines:
+                continue
+            process_cwd = str(Path(cwd_lines[0]).resolve())
+            if process_cwd != current_cwd:
+                continue
+            processes.append(stripped)
+        return processes
+
+    def start_task_list(task_list: list[Task]) -> None:
+        """启动一组任务。"""
+        for task in task_list:
+            if task.is_attached():
+                continue
+            status_hook, log_hook = task_hooks[task.task_id]
+            task.start(thread_task_map, True, status_hook, log_hook)
+
+    def start_deferred_tasks_after_handover(task_list: list[Task]) -> None:
+        """等待旧版本退出后切换WS并启动剩余任务。"""
+        while list_other_launcher_processes():
+            time.sleep(app_config.OLD_LAUNCHER_CHECK_INTERVAL_SECONDS)
+        if any(task.task_id == "D10002-4" for task in tasks):
+            cex_orderbook_ws_common.set_market_write_enabled("future", True)
+            cex_orderbook_ws_common.flush_market_buffer("future")
+            log_to_task("D10002-4", "检测到旧版本已退出，已切换为落盘模式并补写缓存")
+        if any(task.task_id == "D10006-8" for task in tasks):
+            cex_orderbook_ws_common.set_market_write_enabled("spot", True)
+            cex_orderbook_ws_common.flush_market_buffer("spot")
+            log_to_task("D10006-8", "检测到旧版本已退出，已切换为落盘模式并补写缓存")
+        for task in task_list:
+            task.waiting_start = False
+        start_task_list(task_list)
+
+    other_launchers = list_other_launcher_processes()
+    if other_launchers:
+        update_startup_progress(startup_progress, "检测旧版本", 0, len(tasks), "发现旧版本进程，先启动WS待切换模式")
+        future_ws_selected = any(task.task_id == "D10002-4" for task in tasks)
+        spot_ws_selected = any(task.task_id == "D10006-8" for task in tasks)
+        if future_ws_selected:
+            cex_orderbook_ws_common.clear_market_buffer("future")
+            cex_orderbook_ws_common.set_market_write_enabled("future", False)
+            log_to_task("D10002-4", f"检测到旧版本仍在运行，当前只连接不落盘，共 {len(other_launchers)} 个旧进程")
+        if spot_ws_selected:
+            cex_orderbook_ws_common.clear_market_buffer("spot")
+            cex_orderbook_ws_common.set_market_write_enabled("spot", False)
+            log_to_task("D10006-8", f"检测到旧版本仍在运行，当前只连接不落盘，共 {len(other_launchers)} 个旧进程")
+        deferred_tasks = [task for task in tasks if task.task_id not in WS_TASK_IDS]
+        immediate_tasks = [task for task in tasks if task.task_id in WS_TASK_IDS]
+        for task in deferred_tasks:
+            task.waiting_start = True
+        for index, task in enumerate(immediate_tasks, start=1):
+            update_startup_progress(startup_progress, "启动WS待切换", index, len(immediate_tasks), task.name)
+        start_task_list(immediate_tasks)
+        if deferred_tasks:
+            monitor_thread = threading.Thread(
+                target=start_deferred_tasks_after_handover,
+                args=(deferred_tasks,),
+                name="launcher-handover-monitor",
+                daemon=True,
+            )
+            monitor_thread.start()
+        update_startup_progress(startup_progress, "启动完成", len(immediate_tasks), len(tasks), "WS已启动，等待旧版本退出后切换")
+        return tasks, status_counts, status_times, status_meta, logs, pending
+
     for index, task in enumerate(tasks, start=1):
         update_startup_progress(startup_progress, "启动任务", index, len(tasks), task.name)
-        if task.is_attached():
-            continue
-        status_hook, log_hook = task_hooks[task.task_id]
-        task.start(thread_task_map, True, status_hook, log_hook)
+    start_task_list(tasks)
     update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "准备进入界面")
     return tasks, status_counts, status_times, status_meta, logs, pending
 
@@ -939,7 +1037,9 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if row >= task_rule_row:
                 break
             if cex_config.is_supported(task.task_id, current_exchange):
-                if task.is_attached():
+                if task.waiting_start:
+                    status = "等待切换"
+                elif task.is_attached():
                     parent_task = task_map.get(ATTACHED_TASK_PARENTS[task.task_id])
                     status = "运行中" if parent_task and parent_task.is_running() else "已退出"
                 else:
@@ -954,7 +1054,9 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if status == cex_config.UNSUPPORTED_STATUS_TEXT:
                 status_attr = header_attr
             else:
-                if task.is_attached():
+                if task.waiting_start:
+                    status_attr = warm_attr
+                elif task.is_attached():
                     parent_task = task_map.get(ATTACHED_TASK_PARENTS[task.task_id])
                     status_attr = ok_attr if parent_task and parent_task.is_running() else bad_attr
                 else:

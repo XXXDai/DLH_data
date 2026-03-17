@@ -41,6 +41,12 @@ MARKET_STATUS_HOOK = {"future": None, "spot": None}  # 分市场状态回调映�
 MARKET_LOG_HOOK = {"future": None, "spot": None}  # 分市场日志回调映射，映射
 PRIMARY_ROLE = "primary"  # 主连接角色标识，字符串
 BACKUP_ROLE = "backup"  # 备连接角色标识，字符串
+STANDBY_BUFFER_MAX_LINES = app_config.WS_STANDBY_BUFFER_MAX_LINES  # WS待切换缓存每文件最大行数，行
+MARKET_WRITE_ENABLED = {"future": True, "spot": True}  # 分市场落盘开关映射，映射
+MARKET_BUFFER_LOCK = {"future": threading.Lock(), "spot": threading.Lock()}  # 分市场缓存锁映射，映射
+MARKET_BUFFERED_LINES = {"future": {}, "spot": {}}  # 分市场缓存行映射，映射
+MARKET_BUFFERED_SETS = {"future": {}, "spot": {}}  # 分市场缓存去重集合映射，映射
+MARKET_BUFFER_DROP_COUNTS = {"future": {}, "spot": {}}  # 分市场缓存丢弃计数映射，映射
 
 
 class NetworkRequestError(RuntimeError):
@@ -52,6 +58,115 @@ def configure_market_runtime(market: str, quiet: bool, status_hook, log_hook) ->
     MARKET_QUIET[market] = quiet
     MARKET_STATUS_HOOK[market] = status_hook
     MARKET_LOG_HOOK[market] = log_hook
+
+
+def set_market_write_enabled(market: str, enabled: bool) -> None:
+    """设置指定市场的落盘开关。"""
+    MARKET_WRITE_ENABLED[market] = enabled
+
+
+def is_market_write_enabled(market: str) -> bool:
+    """判断指定市场是否允许落盘。"""
+    return bool(MARKET_WRITE_ENABLED.get(market, True))
+
+
+def clear_market_buffer(market: str) -> None:
+    """清空指定市场的缓存内容。"""
+    with MARKET_BUFFER_LOCK[market]:
+        MARKET_BUFFERED_LINES[market].clear()
+        MARKET_BUFFERED_SETS[market].clear()
+        MARKET_BUFFER_DROP_COUNTS[market].clear()
+
+
+def build_buffer_dedupe_key(payload: dict) -> str:
+    """构造待切换缓存使用的稳定去重键。"""
+    if "update_type" in payload:
+        return json.dumps(
+            {
+                "kind": "snapshot",
+                "symbol": payload.get("symbol"),
+                "update_type": payload.get("update_type"),
+                "ts": payload.get("ts"),
+                "cts": payload.get("cts"),
+                "update_id": payload.get("update_id"),
+                "seq": payload.get("seq"),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    if "topic" in payload and "data" in payload:
+        data = payload.get("data") or {}
+        return json.dumps(
+            {
+                "kind": "raw",
+                "topic": payload.get("topic"),
+                "symbol": payload.get("symbol"),
+                "type": payload.get("type"),
+                "ts": payload.get("ts"),
+                "cts": payload.get("cts"),
+                "u": data.get("u"),
+                "seq": data.get("seq"),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    normalized_payload = dict(payload)
+    normalized_payload.pop("collect_ts", None)
+    return json.dumps(normalized_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def buffer_json_line(market: str, file_path: Path, payload: dict) -> None:
+    """缓存待切换期间的JSON行。"""
+    line = json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
+    dedupe_key = build_buffer_dedupe_key(payload)
+    file_key = str(file_path.resolve())
+    with MARKET_BUFFER_LOCK[market]:
+        line_set = MARKET_BUFFERED_SETS[market].setdefault(file_key, set())
+        if dedupe_key in line_set:
+            return
+        line_queue = MARKET_BUFFERED_LINES[market].setdefault(file_key, deque(maxlen=STANDBY_BUFFER_MAX_LINES))
+        if len(line_queue) == line_queue.maxlen:
+            removed_key, _ = line_queue.popleft()
+            line_set.discard(removed_key)
+            dropped_count = int(MARKET_BUFFER_DROP_COUNTS[market].get(file_key) or 0) + 1
+            MARKET_BUFFER_DROP_COUNTS[market][file_key] = dropped_count
+            if dropped_count == 1 or dropped_count % 1000 == 0:
+                log(f"{market} 待切换缓存已满，开始丢弃最早消息: {Path(file_key).name}，累计丢弃 {dropped_count} 条", market)
+        line_queue.append((dedupe_key, line))
+        line_set.add(dedupe_key)
+
+
+def flush_market_buffer(market: str) -> None:
+    """将指定市场的缓存内容补写到正式文件。"""
+    with MARKET_BUFFER_LOCK[market]:
+        buffered_lines = MARKET_BUFFERED_LINES[market]
+        if not buffered_lines:
+            return
+        flush_items = [(file_key, list(lines)) for file_key, lines in buffered_lines.items()]
+        MARKET_BUFFERED_LINES[market] = {}
+        MARKET_BUFFERED_SETS[market] = {}
+        MARKET_BUFFER_DROP_COUNTS[market] = {}
+    for file_key, lines in flush_items:
+        file_path = Path(file_key)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_keys = set()
+        if file_path.exists():
+            with file_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    payload = json.loads(line)
+                    existing_keys.add(build_buffer_dedupe_key(payload))
+        wrote = False
+        with file_path.open("a", encoding="utf-8") as f:
+            for dedupe_key, line in lines:
+                if dedupe_key in existing_keys:
+                    continue
+                f.write(line)
+                existing_keys.add(dedupe_key)
+                wrote = True
+        if wrote:
+            upload_file_to_s3(file_path)
 
 
 def log(message: str, market: str | None = None) -> None:
@@ -122,6 +237,14 @@ def close_writer(writer) -> None:
     if writer:
         writer[2].close()
         upload_file_to_s3(writer[1])
+
+
+def close_writers(rt_writer, rt_ss_writer, rt_ss_1s_writer) -> tuple[None, None, None]:
+    """关闭一组订单簿输出句柄。"""
+    close_writer(rt_writer)
+    close_writer(rt_ss_writer)
+    close_writer(rt_ss_1s_writer)
+    return None, None, None
 
 
 def hour_str_from_ms(ts_ms: int) -> str:
@@ -720,6 +843,11 @@ def write_json_line(writer, payload: dict) -> None:
     writer[2].write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
 
 
+def build_snapshot_file_path(base_dir: Path, symbol: str, tag: str, snapshot: dict) -> Path:
+    """按快照时间构造输出文件路径。"""
+    return build_file_path(base_dir, symbol, hour_str_from_ms(snapshot["collect_ts"]), tag)
+
+
 def flush_second_snapshot(last_snapshot: dict | None, writer, base_dir: Path, tag: str, symbol: str):
     """将上一秒快照写入秒级文件。"""
     if not last_snapshot:
@@ -828,36 +956,57 @@ def run_session(exchange: str, market: str, symbol: str, role: str, ws_url: str,
             raw_records, snapshots = apply_okx_message(orderbook, market, symbol, message, collect_ts, depth)
 
         active_now = is_active_role(state, role)
+        write_enabled = is_market_write_enabled(market)
         if not active_now:
-            close_writer(rt_writer)
-            close_writer(rt_ss_writer)
-            close_writer(rt_ss_1s_writer)
-            rt_writer = None
-            rt_ss_writer = None
-            rt_ss_1s_writer = None
+            rt_writer, rt_ss_writer, rt_ss_1s_writer = close_writers(rt_writer, rt_ss_writer, rt_ss_1s_writer)
         else:
-            hour_str = hour_str_from_ms(collect_ts)
-            rt_writer = ensure_writer(rt_dir, symbol, hour_str, rt_tag, rt_writer)
-            for raw_record in raw_records:
-                write_json_line(rt_writer, raw_record)
-            for snapshot in snapshots:
-                snapshot_hour = hour_str_from_ms(snapshot["collect_ts"])
-                rt_ss_writer = ensure_writer(rt_ss_dir, symbol, snapshot_hour, rt_ss_tag, rt_ss_writer)
-                write_json_line(rt_ss_writer, snapshot)
-                second_bucket = int(snapshot["collect_ts"] / 1000)
-                if last_second is None:
-                    last_second = second_bucket
-                if second_bucket != last_second and last_snapshot:
-                    rt_ss_1s_writer = flush_second_snapshot(last_snapshot, rt_ss_1s_writer, rt_ss_1s_dir, rt_ss_1s_tag, symbol)
-                    last_second = second_bucket
-                last_snapshot = snapshot
+            if not write_enabled:
+                rt_writer, rt_ss_writer, rt_ss_1s_writer = close_writers(rt_writer, rt_ss_writer, rt_ss_1s_writer)
+                raw_path = build_file_path(rt_dir, symbol, hour_str_from_ms(collect_ts), rt_tag)
+                for raw_record in raw_records:
+                    buffer_json_line(market, raw_path, raw_record)
+                for snapshot in snapshots:
+                    buffer_json_line(market, build_snapshot_file_path(rt_ss_dir, symbol, rt_ss_tag, snapshot), snapshot)
+                    second_bucket = int(snapshot["collect_ts"] / 1000)
+                    if last_second is None:
+                        last_second = second_bucket
+                    if second_bucket != last_second and last_snapshot:
+                        buffer_json_line(
+                            market,
+                            build_snapshot_file_path(rt_ss_1s_dir, symbol, rt_ss_1s_tag, last_snapshot),
+                            last_snapshot,
+                        )
+                        last_second = second_bucket
+                    last_snapshot = snapshot
+            else:
+                flush_market_buffer(market)
+                hour_str = hour_str_from_ms(collect_ts)
+                rt_writer = ensure_writer(rt_dir, symbol, hour_str, rt_tag, rt_writer)
+                for raw_record in raw_records:
+                    write_json_line(rt_writer, raw_record)
+                for snapshot in snapshots:
+                    snapshot_hour = hour_str_from_ms(snapshot["collect_ts"])
+                    rt_ss_writer = ensure_writer(rt_ss_dir, symbol, snapshot_hour, rt_ss_tag, rt_ss_writer)
+                    write_json_line(rt_ss_writer, snapshot)
+                    second_bucket = int(snapshot["collect_ts"] / 1000)
+                    if last_second is None:
+                        last_second = second_bucket
+                    if second_bucket != last_second and last_snapshot:
+                        rt_ss_1s_writer = flush_second_snapshot(last_snapshot, rt_ss_1s_writer, rt_ss_1s_dir, rt_ss_1s_tag, symbol)
+                        last_second = second_bucket
+                    last_snapshot = snapshot
 
     heartbeat_closed.set()
     if last_snapshot and is_active_role(state, role):
-        rt_ss_1s_writer = flush_second_snapshot(last_snapshot, rt_ss_1s_writer, rt_ss_1s_dir, rt_ss_1s_tag, symbol)
-    close_writer(rt_writer)
-    close_writer(rt_ss_writer)
-    close_writer(rt_ss_1s_writer)
+        if is_market_write_enabled(market):
+            rt_ss_1s_writer = flush_second_snapshot(last_snapshot, rt_ss_1s_writer, rt_ss_1s_dir, rt_ss_1s_tag, symbol)
+        else:
+            buffer_json_line(
+                market,
+                build_snapshot_file_path(rt_ss_1s_dir, symbol, rt_ss_1s_tag, last_snapshot),
+                last_snapshot,
+            )
+    rt_writer, rt_ss_writer, rt_ss_1s_writer = close_writers(rt_writer, rt_ss_writer, rt_ss_1s_writer)
     ws.close()
     update_shared_status(state, exchange, market, symbol, role, connected=False, status_text="连接关闭")
     switch_active_role(state, exchange, market, symbol, role)
