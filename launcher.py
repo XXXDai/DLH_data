@@ -5,6 +5,7 @@ import curses
 import math
 import os
 import runpy
+import signal
 import subprocess
 import sys
 import threading
@@ -37,6 +38,16 @@ apply_storage_mode_from_argv()
 def has_remove_flag() -> bool:
     """判断是否启用清理启动参数。"""
     return "-rm" in sys.argv
+
+
+def handle_sigint(_signum, _frame) -> None:
+    """统一处理Ctrl+C退出，直接结束整个进程。"""
+    sys.__stdout__.write("\n")
+    sys.__stdout__.flush()
+    os._exit(130)
+
+
+signal.signal(signal.SIGINT, handle_sigint)
 
 
 TASK_DEFS = [
