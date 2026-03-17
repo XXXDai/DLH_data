@@ -115,7 +115,13 @@ def prefetch_storage_key_index() -> None:
     child_dirs: dict[str, set[str]] = {}
     child_files: dict[str, list[str]] = {}
     paginator = cex_common.get_s3_client().get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=app_config.S3_BUCKET_NAME, Prefix=prefix):
+    last_name = "-"
+    last_reported = 0
+    for page in paginator.paginate(
+        Bucket=app_config.S3_BUCKET_NAME,
+        Prefix=prefix,
+        PaginationConfig={"PageSize": 1000},
+    ):
         for item in page.get("Contents", []):
             key = str(item.get("Key") or "")
             if not key or key.endswith("/"):
@@ -123,14 +129,17 @@ def prefetch_storage_key_index() -> None:
             keys.add(key)
             file_sizes[key] = int(item.get("Size") or 0)
             suffix = key[len(prefix) :] if key.startswith(prefix) else key
+            last_name = Path(suffix).name
             parts = suffix.split("/")
             for index, dir_name in enumerate(parts[:-1]):
                 parent_rel = "/".join(parts[:index])
                 child_dirs.setdefault(parent_rel, set()).add(dir_name)
             parent_rel = "/".join(parts[:-1])
             child_files.setdefault(parent_rel, []).append(parts[-1])
-        sample_name = Path(sorted(keys)[-1]).name if keys else "-"
-        print_scan_progress("索引S3文件", len(keys), sample_name)
+        if len(keys) - last_reported >= 5000:
+            print_scan_progress("索引S3文件", len(keys), last_name)
+            last_reported = len(keys)
+    print_scan_progress("索引S3文件", len(keys), last_name)
     print()
     VALIDATE_S3_KEYS = keys
     VALIDATE_S3_FILE_SIZES = file_sizes
@@ -362,7 +371,7 @@ def validate_orderbook_di(
 
     for sym in base_symbols:
         if sym not in observed_symbols:
-            report.warn(f"{dataset_id} 缺少交易对目录: {sym}")
+            report.warn(f"{dataset_id} 缺少交易对目录: {data_dir / sym}")
 
 
 def validate_trade_di(
@@ -441,7 +450,7 @@ def validate_trade_di(
 
     for sym in base_symbols:
         if sym not in observed_symbols:
-            report.warn(f"{dataset_id} 缺少交易对目录: {sym}")
+            report.warn(f"{dataset_id} 缺少交易对目录: {data_dir / sym}")
 
 
 def parse_bitget_archive_date(name: str) -> str | None:
@@ -542,7 +551,7 @@ def validate_bitget_trade_raw_di(
 
     for sym in base_symbols:
         if sym not in observed_symbols:
-            report.warn(f"{dataset_id} 缺少交易对目录: {sym}")
+            report.warn(f"{dataset_id} 缺少交易对目录: {data_dir / sym}")
 
 
 def validate_single_csv_per_symbol(
@@ -578,7 +587,7 @@ def validate_single_csv_per_symbol(
 
     for sym in symbols:
         if sym not in observed:
-            report.warn(f"{dataset_id} 缺少目录: {sym}")
+            report.warn(f"{dataset_id} 缺少目录: {data_dir / sym}")
 
 
 def validate_enabled_orderbook_di(
