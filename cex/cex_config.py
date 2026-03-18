@@ -4,7 +4,7 @@ from pathlib import Path
 CEX_EXCHANGES = ["bybit", "binance", "bitget", "okx"]  # CEX交易所列表，个数
 CEX_BASE_COINS = ["BTC", "ETH", "SOL"]  # 基础币种列表，个数
 EXCHANGE_ENABLED = {
-    "bybit": True,  # Bybit总开关，开关
+    "bybit": False,  # Bybit总开关，开关
     "binance": True,  # Binance总开关，开关
     "bitget": True,  # Bitget总开关，开关
     "okx": True,  # OKX总开关，开关

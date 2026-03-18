@@ -84,10 +84,14 @@ def list_other_launcher_processes() -> list[str]:
 
 
 def handle_sigint(_signum, _frame) -> None:
-    """统一处理Ctrl+C退出，直接结束整个进程。"""
-    sys.__stdout__.write("\n")
-    sys.__stdout__.flush()
-    os._exit(130)
+    """统一处理Ctrl+C退出请求。"""
+    EXIT_REQUESTED.set()
+
+
+def restore_stdio() -> None:
+    """恢复标准输出与错误输出。"""
+    sys.stdout = sys.__stdout__
+    sys.stderr = sys.__stderr__
 
 
 signal.signal(signal.SIGINT, handle_sigint)
@@ -117,6 +121,7 @@ ATTACHED_TASK_PARENTS = {
     "D10012": "D10005",  # D10012附属父任务标识，字符串
 }  # 附属任务父任务映射，映射
 WS_TASK_IDS = {"D10002-4", "D10006-8"}  # WS任务标识集合，个数
+EXIT_REQUESTED = threading.Event()  # 退出请求事件，事件
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -957,6 +962,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
     schedule_cache = {}
     last_schedule_ts = 0.0
     while True:
+        if EXIT_REQUESTED.is_set():
+            break
         stdscr.erase()
         max_rows, max_cols = stdscr.getmaxyx()
         if max_rows <= 0 or max_cols <= 0:
@@ -1375,6 +1382,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
 
 def main() -> None:
     """启动任务并进入TUI。"""
+    EXIT_REQUESTED.clear()
     startup_progress = {
         "phase": "准备启动",
         "current": 0,
@@ -1393,8 +1401,18 @@ def main() -> None:
     bootstrap_thread = threading.Thread(target=bootstrap, name="launcher-bootstrap", daemon=True)
     bootstrap_thread.start()
     while bootstrap_thread.is_alive():
+        if EXIT_REQUESTED.is_set():
+            restore_stdio()
+            sys.__stdout__.write("\n")
+            sys.__stdout__.flush()
+            return
         render_pre_tui(startup_progress)
         time.sleep(app_config.TUI_REFRESH_SECONDS)
+    if EXIT_REQUESTED.is_set():
+        restore_stdio()
+        sys.__stdout__.write("\n")
+        sys.__stdout__.flush()
+        return
     if startup_progress["result"] is None:
         raise RuntimeError("启动失败，未能生成任务列表")
     render_pre_tui(startup_progress)
@@ -1402,7 +1420,9 @@ def main() -> None:
     tasks, status_counts, status_times, status_meta, logs, pending = startup_progress["result"]
     if tasks:
         curses.wrapper(run_tui, tasks, status_counts, status_times, status_meta, logs, pending)
-        os._exit(0)
+    restore_stdio()
+    sys.__stdout__.write("\n")
+    sys.__stdout__.flush()
 
 
 if __name__ == "__main__":
