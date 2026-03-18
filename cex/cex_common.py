@@ -35,6 +35,7 @@ UPLOAD_QUEUE = queue.Queue()  # S3上传任务队列，队列
 UPLOAD_QUEUE_LOCK = threading.Lock()  # S3上传任务去重锁，锁对象
 UPLOAD_PENDING_PATHS = set()  # S3待上传文件集合，个数
 UPLOAD_WORKERS_STARTED = False  # S3上传线程是否已启动，开关
+UPLOAD_WORKER_THREADS = []  # S3上传工作线程列表，个数
 UPLOAD_STARTUP_SYNC_DONE = False  # S3启动补传是否已完成，开关
 UPLOAD_STATUS_LOCK = threading.Lock()  # S3上传状态锁，锁对象
 UPLOAD_ACTIVE_TASKS = {}  # S3活跃上传任务映射，个数
@@ -250,6 +251,7 @@ class UploadProgressTracker:
 
 def get_upload_pool_snapshot() -> dict:
     """返回上传池当前状态快照。"""
+    ensure_upload_workers_started()
     with UPLOAD_STATUS_LOCK:
         active_tasks = list(UPLOAD_ACTIVE_TASKS.values())
     with UPLOAD_QUEUE_LOCK:
@@ -257,6 +259,7 @@ def get_upload_pool_snapshot() -> dict:
         pending_file_names = []
         for file_path in list(UPLOAD_QUEUE.queue)[:15]:
             pending_file_names.append(Path(file_path).name)
+    alive_worker_count = sum(1 for worker in UPLOAD_WORKER_THREADS if worker.is_alive())
     speed_bytes_per_second = 0.0
     file_names = []
     for item in active_tasks:
@@ -266,6 +269,7 @@ def get_upload_pool_snapshot() -> dict:
     return {
         "enabled": is_s3_storage_mode(),
         "workers": app_config.S3_UPLOAD_POOL_WORKERS,
+        "alive_worker_count": alive_worker_count,
         "active_count": len(active_tasks),
         "pending_count": pending_count,
         "startup_synced": UPLOAD_STARTUP_SYNC_DONE,
@@ -296,6 +300,7 @@ def get_upload_startup_snapshot() -> dict:
 def reset_upload_runtime() -> None:
     """重置上传池内存状态。"""
     global UPLOAD_WORKERS_STARTED
+    global UPLOAD_WORKER_THREADS
     global UPLOAD_STARTUP_SYNC_DONE
     with UPLOAD_QUEUE_LOCK:
         UPLOAD_PENDING_PATHS.clear()
@@ -314,6 +319,7 @@ def reset_upload_runtime() -> None:
         UPLOAD_STARTUP_STATUS["deleted"] = 0
         UPLOAD_STARTUP_STATUS["done"] = False
     UPLOAD_WORKERS_STARTED = False
+    UPLOAD_WORKER_THREADS = []
     UPLOAD_STARTUP_SYNC_DONE = False
 
 
@@ -373,20 +379,17 @@ def upload_worker_loop() -> None:
 def ensure_upload_workers_started() -> None:
     """确保S3上传线程池已启动。"""
     global UPLOAD_WORKERS_STARTED
-    if UPLOAD_WORKERS_STARTED:
-        sync_local_files_to_s3_on_startup()
-        return
     with UPLOAD_QUEUE_LOCK:
-        if UPLOAD_WORKERS_STARTED:
-            sync_local_files_to_s3_on_startup()
-            return
-        for index in range(app_config.S3_UPLOAD_POOL_WORKERS):
+        alive_threads = [worker for worker in UPLOAD_WORKER_THREADS if worker.is_alive()]
+        UPLOAD_WORKER_THREADS[:] = alive_threads
+        for index in range(len(alive_threads), app_config.S3_UPLOAD_POOL_WORKERS):
             worker = threading.Thread(
                 target=upload_worker_loop,
                 name=f"s3-upload-{index + 1}",
                 daemon=True,
             )
             worker.start()
+            UPLOAD_WORKER_THREADS.append(worker)
         UPLOAD_WORKERS_STARTED = True
     sync_local_files_to_s3_on_startup()
 

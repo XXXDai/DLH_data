@@ -380,7 +380,8 @@ def build_upload_pool_text(max_cells: int) -> str:
         return "上传池: 关闭"
     file_text = "、".join(snapshot["file_names"]) if snapshot["file_names"] else "-"
     text = (
-        f"上传池: {snapshot['active_count']}/{snapshot['workers']} | "
+        f"上传池: 线程 {snapshot['alive_worker_count']}/{snapshot['workers']} | "
+        f"活跃 {snapshot['active_count']} | "
         f"待上传: {snapshot['pending_count']} | "
         f"速度: {format_speed_text(snapshot['speed_bytes_per_second'])} | "
         f"文件: {file_text}"
@@ -397,7 +398,8 @@ def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr
     draw_clipped_text(stdscr, section_row, 0, "上传管理", max_cols - 1, header_attr)
     summary_text = (
         f"状态: {'已初始化' if snapshot['startup_synced'] else '启动扫描中'} | "
-        f"线程: {snapshot['active_count']}/{snapshot['workers']} | "
+        f"线程: {snapshot['alive_worker_count']}/{snapshot['workers']} | "
+        f"活跃: {snapshot['active_count']} | "
         f"待上传: {snapshot['pending_count']} | "
         f"速度: {format_speed_text(snapshot['speed_bytes_per_second'])}"
     )
