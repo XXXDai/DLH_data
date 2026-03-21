@@ -359,9 +359,16 @@ def run_bybit() -> None:
         for coin in cex_config.CEX_BASE_COINS:
             status_update(exchange, "earn", coin, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for coin in cex_config.CEX_BASE_COINS:
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, "bybit")
     rows_by_coin = fetch_bybit_rows()
     for coin in cex_config.get_earn_coins("bybit"):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+            return
         rows = rows_by_coin.get(coin, [])
         file_path = build_file_path(base_dir, coin)
         existing_count, latest_date = load_existing_sync_info(file_path)
@@ -382,9 +389,16 @@ def run_binance() -> None:
         for coin in cex_config.CEX_BASE_COINS:
             status_update(exchange, "earn", coin, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for coin in cex_config.CEX_BASE_COINS:
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     rows_by_coin = fetch_binance_rows()
     for coin in cex_config.get_earn_coins(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+            return
         rows = rows_by_coin.get(coin, [])
         file_path = build_file_path(base_dir, coin)
         existing_count, latest_date = load_existing_sync_info(file_path)
@@ -405,9 +419,16 @@ def run_bitget() -> None:
         for coin in cex_config.CEX_BASE_COINS:
             status_update(exchange, "earn", coin, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for coin in cex_config.CEX_BASE_COINS:
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     rows_by_coin = fetch_bitget_rows()
     for coin in cex_config.get_earn_coins(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+            return
         rows = rows_by_coin.get(coin, [])
         file_path = build_file_path(base_dir, coin)
         existing_count, latest_date = load_existing_sync_info(file_path)
@@ -428,9 +449,16 @@ def run_okx() -> None:
         for coin in cex_config.CEX_BASE_COINS:
             status_update(exchange, "earn", coin, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for coin in cex_config.CEX_BASE_COINS:
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     rows_by_coin = fetch_okx_rows()
     for coin in cex_config.get_earn_coins(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+            return
         rows = rows_by_coin.get(coin, [])
         file_path = build_file_path(base_dir, coin)
         existing_count, latest_date = load_existing_sync_info(file_path)
@@ -471,25 +499,41 @@ def main() -> None:
             thread.start()
         for thread in threads:
             thread.join()
-        if cex_config.is_supported(DATASET_ID, "bybit"):
+        if cex_config.apply_pause_if_requested(DATASET_ID, "bybit"):
+            mark_unsupported("bybit")
+            for coin in cex_config.CEX_BASE_COINS:
+                status_update("bybit", "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        elif cex_config.is_supported(DATASET_ID, "bybit"):
             mark_missing_coins("bybit")
         else:
             mark_unsupported("bybit")
-        if cex_config.is_supported(DATASET_ID, "binance"):
+        if cex_config.apply_pause_if_requested(DATASET_ID, "binance"):
+            mark_unsupported("binance")
+            for coin in cex_config.CEX_BASE_COINS:
+                status_update("binance", "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        elif cex_config.is_supported(DATASET_ID, "binance"):
             mark_missing_coins("binance")
         else:
             mark_unsupported("binance")
-        if cex_config.is_supported(DATASET_ID, "bitget"):
+        if cex_config.apply_pause_if_requested(DATASET_ID, "bitget"):
+            mark_unsupported("bitget")
+            for coin in cex_config.CEX_BASE_COINS:
+                status_update("bitget", "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        elif cex_config.is_supported(DATASET_ID, "bitget"):
             mark_missing_coins("bitget")
         else:
             mark_unsupported("bitget")
-        if cex_config.is_supported(DATASET_ID, "okx"):
+        if cex_config.apply_pause_if_requested(DATASET_ID, "okx"):
+            mark_unsupported("okx")
+            for coin in cex_config.CEX_BASE_COINS:
+                status_update("okx", "earn", coin, cex_config.PAUSED_STATUS_TEXT)
+        elif cex_config.is_supported(DATASET_ID, "okx"):
             mark_missing_coins("okx")
         else:
             mark_unsupported("okx")
         sleep_seconds = seconds_until_next_utc_midnight()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
-        threading.Event().wait(sleep_seconds)
+        cex_config.wait_with_task_control(sleep_seconds)
 
 
 def run() -> None:

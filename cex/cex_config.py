@@ -1,4 +1,6 @@
 from pathlib import Path
+import threading
+import time
 
 
 CEX_EXCHANGES = ["bybit", "binance", "bitget", "okx"]  # CEX交易所列表，个数
@@ -423,6 +425,12 @@ DATASET_OUTPUT_DIRS = {
 }  # 输出目录矩阵，映射
 
 UNSUPPORTED_STATUS_TEXT = "未支持"  # 未支持状态文本，字符串
+PAUSE_REQUESTED_STATUS_TEXT = "暂停中"  # 暂停请求状态文本，字符串
+PAUSED_STATUS_TEXT = "已暂停"  # 已暂停状态文本，字符串
+PAUSED_DATASET_EXCHANGES = {}  # 数据集与交易所暂停状态映射，映射
+PAUSE_REQUESTED_DATASET_EXCHANGES = {}  # 数据集与交易所暂停请求映射，映射
+TASK_CONTROL_LOCK = threading.Lock()  # 任务控制状态锁，锁
+TASK_CONTROL_EVENT = threading.Event()  # 任务控制唤醒事件，事件
 
 
 def list_exchanges() -> list:
@@ -491,6 +499,92 @@ def get_supported_exchanges(dataset_id: str) -> list:
 def is_supported(dataset_id: str, exchange: str) -> bool:
     """判断指定数据集是否支持该交易所。"""
     return is_exchange_enabled(exchange) and bool(DATASET_SUPPORT.get(dataset_id, {}).get(exchange))
+
+
+def is_paused(dataset_id: str, exchange: str) -> bool:
+    """判断指定数据集是否已暂停。"""
+    with TASK_CONTROL_LOCK:
+        return bool(PAUSED_DATASET_EXCHANGES.get((dataset_id, exchange), False))
+
+
+def is_pause_requested(dataset_id: str, exchange: str) -> bool:
+    """判断指定数据集是否已请求暂停。"""
+    with TASK_CONTROL_LOCK:
+        return bool(PAUSE_REQUESTED_DATASET_EXCHANGES.get((dataset_id, exchange), False))
+
+
+def is_pause_pending(dataset_id: str, exchange: str) -> bool:
+    """判断指定数据集是否处于暂停流程。"""
+    with TASK_CONTROL_LOCK:
+        return bool(
+            PAUSED_DATASET_EXCHANGES.get((dataset_id, exchange), False)
+            or PAUSE_REQUESTED_DATASET_EXCHANGES.get((dataset_id, exchange), False)
+        )
+
+
+def set_paused(dataset_id: str, exchange: str, paused: bool) -> bool:
+    """设置指定数据集的已暂停状态。"""
+    with TASK_CONTROL_LOCK:
+        if paused:
+            PAUSED_DATASET_EXCHANGES[(dataset_id, exchange)] = True
+            PAUSE_REQUESTED_DATASET_EXCHANGES.pop((dataset_id, exchange), None)
+        else:
+            PAUSED_DATASET_EXCHANGES.pop((dataset_id, exchange), None)
+            PAUSE_REQUESTED_DATASET_EXCHANGES.pop((dataset_id, exchange), None)
+    TASK_CONTROL_EVENT.set()
+    return paused
+
+
+def request_pause(dataset_id: str, exchange: str) -> str:
+    """请求指定数据集在安全边界暂停。"""
+    with TASK_CONTROL_LOCK:
+        key = (dataset_id, exchange)
+        if PAUSED_DATASET_EXCHANGES.get(key):
+            PAUSED_DATASET_EXCHANGES.pop(key, None)
+            PAUSE_REQUESTED_DATASET_EXCHANGES.pop(key, None)
+            state = "running"
+        elif PAUSE_REQUESTED_DATASET_EXCHANGES.get(key):
+            PAUSE_REQUESTED_DATASET_EXCHANGES.pop(key, None)
+            state = "running"
+        else:
+            PAUSE_REQUESTED_DATASET_EXCHANGES[key] = True
+            state = "pause_requested"
+    TASK_CONTROL_EVENT.set()
+    return state
+
+
+def toggle_paused(dataset_id: str, exchange: str) -> str:
+    """切换指定数据集的暂停状态。"""
+    return request_pause(dataset_id, exchange)
+
+
+def apply_pause_if_requested(dataset_id: str, exchange: str) -> bool:
+    """在安全边界将暂停请求落为已暂停。"""
+    with TASK_CONTROL_LOCK:
+        key = (dataset_id, exchange)
+        if PAUSE_REQUESTED_DATASET_EXCHANGES.get(key):
+            PAUSE_REQUESTED_DATASET_EXCHANGES.pop(key, None)
+            PAUSED_DATASET_EXCHANGES[key] = True
+            changed = True
+        else:
+            changed = False
+        paused = bool(PAUSED_DATASET_EXCHANGES.get(key))
+    if changed:
+        TASK_CONTROL_EVENT.set()
+    return paused
+
+
+def wait_with_task_control(seconds: int | float) -> None:
+    """按秒等待并响应任务控制变更。"""
+    deadline = time.time() + max(0.0, float(seconds))
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return
+        triggered = TASK_CONTROL_EVENT.wait(timeout=min(1.0, remaining))
+        if triggered:
+            TASK_CONTROL_EVENT.clear()
+            return
 
 
 def get_start_date(dataset_id: str, exchange: str, symbol: str) -> str:

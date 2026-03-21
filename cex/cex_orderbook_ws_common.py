@@ -32,6 +32,9 @@ RECV_TIMEOUT_SECONDS = app_config.WS_RECV_TIMEOUT_SECONDS  # WS接收超时，�
 RECONNECT_INTERVAL_SECONDS = app_config.WS_RECONNECT_INTERVAL_SECONDS  # WS重连间隔，秒
 STATUS_INTERVAL_SECONDS = app_config.WS_STATUS_INTERVAL_SECONDS  # WS状态刷新间隔，秒
 PING_INTERVAL_SECONDS = app_config.WS_PING_INTERVAL_SECONDS  # WS心跳间隔，秒
+WRITE_BUFFER_LINES = app_config.WS_WRITE_BUFFER_LINES  # WS写入缓冲行数阈值，行
+WRITE_BUFFER_BYTES = app_config.WS_WRITE_BUFFER_BYTES  # WS写入缓冲字节阈值，字节
+WRITE_BUFFER_INTERVAL_SECONDS = app_config.WS_WRITE_BUFFER_INTERVAL_SECONDS  # WS写入缓冲刷新间隔，秒
 DELIVERY_REFRESH_SECONDS = app_config.DELIVERY_REFRESH_SECONDS  # 动态合约刷新间隔，秒
 QUIET = False  # 静默模式开关，开关
 STATUS_HOOK = None  # 状态回调函数，函数
@@ -76,6 +79,27 @@ def clear_market_buffer(market: str) -> None:
         MARKET_BUFFERED_LINES[market].clear()
         MARKET_BUFFERED_SETS[market].clear()
         MARKET_BUFFER_DROP_COUNTS[market].clear()
+
+
+def get_market_buffer_snapshot(market: str) -> dict:
+    """返回指定市场的待切换缓存快照。"""
+    with MARKET_BUFFER_LOCK[market]:
+        file_count = len(MARKET_BUFFERED_LINES[market])
+        line_count = sum(len(lines) for lines in MARKET_BUFFERED_LINES[market].values())
+        dropped_count = sum(int(count) for count in MARKET_BUFFER_DROP_COUNTS[market].values())
+    return {
+        "file_count": file_count,
+        "line_count": line_count,
+        "dropped_count": dropped_count,
+    }
+
+
+def get_all_market_buffer_snapshots() -> dict:
+    """返回全部市场的待切换缓存快照。"""
+    return {
+        "future": get_market_buffer_snapshot("future"),
+        "spot": get_market_buffer_snapshot("spot"),
+    }
 
 
 def build_buffer_dedupe_key(payload: dict) -> str:
@@ -225,16 +249,30 @@ def ensure_writer(base_dir: Path, symbol: str, hour_str: str, tag: str, writer):
     if writer and writer[0] == hour_str:
         return writer
     if writer:
+        writer = flush_writer_buffer(writer)
         writer[2].close()
         upload_file_to_s3(writer[1])
     path = build_file_path(base_dir, symbol, hour_str, tag)
     path.parent.mkdir(parents=True, exist_ok=True)
-    return hour_str, path, path.open("a", encoding="utf-8")
+    return [hour_str, path, path.open("a", encoding="utf-8"), [], 0, time.monotonic()]
+
+
+def flush_writer_buffer(writer):
+    """刷出单个文件句柄的缓冲内容。"""
+    if not writer or not writer[3]:
+        return writer
+    writer[2].write("".join(writer[3]))
+    writer[2].flush()
+    writer[3].clear()
+    writer[4] = 0
+    writer[5] = time.monotonic()
+    return writer
 
 
 def close_writer(writer) -> None:
     """关闭输出文件句柄。"""
     if writer:
+        writer = flush_writer_buffer(writer)
         writer[2].close()
         upload_file_to_s3(writer[1])
 
@@ -838,9 +876,19 @@ def apply_okx_message(orderbook: dict, market: str, symbol: str, message: dict, 
     return raw_records, snapshots
 
 
-def write_json_line(writer, payload: dict) -> None:
+def write_json_line(writer, payload: dict):
     """写入单行JSON记录。"""
-    writer[2].write(json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n")
+    line = json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
+    writer[3].append(line)
+    writer[4] += len(line.encode("utf-8"))
+    now_ts = time.monotonic()
+    if (
+        len(writer[3]) >= WRITE_BUFFER_LINES
+        or writer[4] >= WRITE_BUFFER_BYTES
+        or now_ts - writer[5] >= WRITE_BUFFER_INTERVAL_SECONDS
+    ):
+        flush_writer_buffer(writer)
+    return writer
 
 
 def build_snapshot_file_path(base_dir: Path, symbol: str, tag: str, snapshot: dict) -> Path:
@@ -854,7 +902,7 @@ def flush_second_snapshot(last_snapshot: dict | None, writer, base_dir: Path, ta
         return writer
     snapshot_hour = hour_str_from_ms(last_snapshot["collect_ts"])
     writer = ensure_writer(base_dir, symbol, snapshot_hour, tag, writer)
-    write_json_line(writer, last_snapshot)
+    writer = write_json_line(writer, last_snapshot)
     return writer
 
 
@@ -983,11 +1031,11 @@ def run_session(exchange: str, market: str, symbol: str, role: str, ws_url: str,
                 hour_str = hour_str_from_ms(collect_ts)
                 rt_writer = ensure_writer(rt_dir, symbol, hour_str, rt_tag, rt_writer)
                 for raw_record in raw_records:
-                    write_json_line(rt_writer, raw_record)
+                    rt_writer = write_json_line(rt_writer, raw_record)
                 for snapshot in snapshots:
                     snapshot_hour = hour_str_from_ms(snapshot["collect_ts"])
                     rt_ss_writer = ensure_writer(rt_ss_dir, symbol, snapshot_hour, rt_ss_tag, rt_ss_writer)
-                    write_json_line(rt_ss_writer, snapshot)
+                    rt_ss_writer = write_json_line(rt_ss_writer, snapshot)
                     second_bucket = int(snapshot["collect_ts"] / 1000)
                     if last_second is None:
                         last_second = second_bucket
@@ -1048,7 +1096,8 @@ def run_symbol_loop(exchange: str, market: str, symbol: str, stop_event: threadi
 
 def run_exchange_supervisor(exchange: str, market: str) -> None:
     """按交易所维护全部交易对子线程。"""
-    if not cex_config.is_supported("D10002-4" if market == "future" else "D10006-8", exchange):
+    dataset_id = "D10002-4" if market == "future" else "D10006-8"
+    if not cex_config.is_supported(dataset_id, exchange):
         symbol_list = cex_config.get_future_symbols(exchange) if market == "future" else cex_config.get_spot_symbols(exchange)
         for symbol in symbol_list:
             status_update(exchange, market, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
@@ -1056,6 +1105,15 @@ def run_exchange_supervisor(exchange: str, market: str) -> None:
     workers: dict[str, tuple[threading.Event, threading.Thread]] = {}
     fallback_symbols = cex_config.get_future_symbols(exchange) if market == "future" else cex_config.get_spot_symbols(exchange)
     while True:
+        if cex_config.apply_pause_if_requested(dataset_id, exchange):
+            paused_symbols = set(workers) | set(fallback_symbols)
+            for symbol in sorted(workers):
+                stop_event, _thread = workers.pop(symbol)
+                stop_event.set()
+            for symbol in sorted(paused_symbols):
+                status_update(exchange, market, symbol, cex_config.PAUSED_STATUS_TEXT)
+            cex_config.wait_with_task_control(1)
+            continue
         try:
             desired_symbols = resolve_symbols(exchange, market)
         except NetworkRequestError as exc:
@@ -1070,7 +1128,8 @@ def run_exchange_supervisor(exchange: str, market: str) -> None:
         for symbol in sorted(set(workers) - desired_set):
             stop_event, _thread = workers.pop(symbol)
             stop_event.set()
-        time.sleep(DELIVERY_REFRESH_SECONDS if market == "future" else max(DELIVERY_REFRESH_SECONDS, 60))
+        wait_seconds = DELIVERY_REFRESH_SECONDS if market == "future" else max(DELIVERY_REFRESH_SECONDS, 60)
+        cex_config.wait_with_task_control(wait_seconds)
 
 
 def run_market_ws(market: str) -> None:

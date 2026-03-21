@@ -393,6 +393,9 @@ def process_date(input_dataset_id: str, output_dataset_id: str, exchange: str, i
 
 def process_single_date(input_dataset_id: str, output_dataset_id: str, exchange: str, symbol: str, date_str: str) -> None:
     """处理单个交易对单日快照任务。"""
+    if cex_config.apply_pause_if_requested(output_dataset_id, exchange):
+        status_update(output_dataset_id, exchange, symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     input_dir = cex_config.get_source_dir(input_dataset_id, exchange)
     output_dir = cex_config.get_output_dir(output_dataset_id, exchange)
     if not input_dir or not output_dir:
@@ -460,12 +463,21 @@ def run_dataset(input_dataset_id: str, output_dataset_id: str) -> None:
     """运行指定历史订单簿快照任务。"""
     while True:
         for exchange in cex_config.get_supported_exchanges(output_dataset_id):
+            if cex_config.apply_pause_if_requested(output_dataset_id, exchange):
+                input_dir = cex_config.get_source_dir(input_dataset_id, exchange)
+                if input_dir:
+                    for symbol in resolve_symbols(input_dataset_id, exchange, input_dir):
+                        status_update(output_dataset_id, exchange, symbol, cex_config.PAUSED_STATUS_TEXT)
+                continue
             input_dir = cex_config.get_source_dir(input_dataset_id, exchange)
             output_dir = cex_config.get_output_dir(output_dataset_id, exchange)
             start_date = cex_config.get_min_start_date(input_dataset_id, exchange)
             if not input_dir or not output_dir or not start_date:
                 continue
             for symbol in resolve_symbols(input_dataset_id, exchange, input_dir):
+                if cex_config.apply_pause_if_requested(output_dataset_id, exchange):
+                    status_update(output_dataset_id, exchange, symbol, cex_config.PAUSED_STATUS_TEXT)
+                    break
                 available_dates = iter_available_dates(input_dataset_id, exchange, input_dir, symbol, start_date)
                 if not available_dates:
                     status_update(output_dataset_id, exchange, symbol, (0, "无可处理数据"))
@@ -479,6 +491,9 @@ def run_dataset(input_dataset_id: str, output_dataset_id: str) -> None:
                 else:
                     status_update(output_dataset_id, exchange, symbol, (0, f"准备 {available_dates[0]}"))
                 for date_str in available_dates:
+                    if cex_config.apply_pause_if_requested(output_dataset_id, exchange):
+                        status_update(output_dataset_id, exchange, symbol, cex_config.PAUSED_STATUS_TEXT)
+                        break
                     if date_str in processed_dates:
                         continue
                     status_update(output_dataset_id, exchange, symbol, (done_count, f"日 {date_str} 请求中"))
@@ -488,4 +503,4 @@ def run_dataset(input_dataset_id: str, output_dataset_id: str) -> None:
                     status_update(output_dataset_id, exchange, symbol, (done_count, f"日 {date_str} {output_name}"))
         sleep_seconds = seconds_until_next_utc_midnight()
         log(output_dataset_id, f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
-        time.sleep(sleep_seconds)
+        cex_config.wait_with_task_control(sleep_seconds)

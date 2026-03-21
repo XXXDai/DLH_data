@@ -4,6 +4,7 @@ from pathlib import Path
 import curses
 import math
 import os
+import resource
 import runpy
 import signal
 import subprocess
@@ -168,6 +169,27 @@ def sanitize_log_text(text: str) -> str:
     if len(cleaned) > MAX_LOG_LINE_CHARS:
         cleaned = cleaned[:MAX_LOG_LINE_CHARS]
     return cleaned
+
+
+def is_task_paused(task_id: str, exchange: str) -> bool:
+    """判断当前交易所下的任务是否已暂停。"""
+    return cex_config.is_paused(task_id, exchange)
+
+
+def is_task_pause_requested(task_id: str, exchange: str) -> bool:
+    """判断当前交易所下的任务是否处于暂停中。"""
+    return cex_config.is_pause_requested(task_id, exchange)
+
+
+def toggle_task_pause(task_id: str, exchange: str, logs: dict, status_times: dict) -> bool | None:
+    """切换当前交易所下任务的启停状态。"""
+    if not cex_config.is_supported(task_id, exchange):
+        return None
+    state = cex_config.toggle_paused(task_id, exchange)
+    action_text = cex_config.PAUSE_REQUESTED_STATUS_TEXT if state == "pause_requested" else "已启用"
+    logs[task_id].append(f"{exchange} {task_id} {action_text}")
+    status_times[task_id] = time.time()
+    return state == "pause_requested"
 
 
 def install_thread_task_inheritance(thread_task_map: dict) -> None:
@@ -373,6 +395,74 @@ def format_speed_text(speed_bytes_per_second: float) -> str:
     return f"{value:.2f} {units[unit_index]}"
 
 
+def format_bytes_text(byte_count: int) -> str:
+    """格式化字节数文本。"""
+    if byte_count <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(byte_count)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024.0
+        unit_index += 1
+    if value >= 100:
+        return f"{value:.0f} {units[unit_index]}"
+    if value >= 10:
+        return f"{value:.1f} {units[unit_index]}"
+    return f"{value:.2f} {units[unit_index]}"
+
+
+def read_proc_status_value_bytes(field_name: str) -> int:
+    """读取当前进程状态文件中的内存字段。"""
+    proc_status_path = Path("/proc/self/status")
+    if not proc_status_path.exists():
+        return 0
+    for line in proc_status_path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith(f"{field_name}:"):
+            continue
+        parts = line.split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            return 0
+        value = int(parts[1])
+        unit = parts[2] if len(parts) >= 3 else ""
+        if unit == "kB":
+            return value * 1024
+        return value
+    return 0
+
+
+def read_process_rss_bytes() -> int:
+    """读取当前进程常驻内存大小。"""
+    rss_bytes = read_proc_status_value_bytes("VmRSS")
+    if rss_bytes > 0:
+        return rss_bytes
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+
+
+def read_process_peak_rss_bytes() -> int:
+    """读取当前进程峰值常驻内存大小。"""
+    peak_bytes = read_proc_status_value_bytes("VmHWM")
+    if peak_bytes > 0:
+        return peak_bytes
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+
+
+def build_runtime_observe_text(max_cells: int) -> str:
+    """构造运行时观测文本。"""
+    rss_text = format_bytes_text(read_process_rss_bytes())
+    peak_text = format_bytes_text(read_process_peak_rss_bytes())
+    ws_snapshot = cex_orderbook_ws_common.get_all_market_buffer_snapshots()
+    future_snapshot = ws_snapshot["future"]
+    spot_snapshot = ws_snapshot["spot"]
+    text = (
+        f"内存: {rss_text} | "
+        f"峰值: {peak_text} | "
+        f"WS缓存 future {future_snapshot['file_count']}文件/{future_snapshot['line_count']}行 | "
+        f"spot {spot_snapshot['file_count']}文件/{spot_snapshot['line_count']}行"
+    )
+    return truncate_by_cells(text, max_cells)
+
+
 def build_upload_pool_text(max_cells: int) -> str:
     """构造上传池状态文本。"""
     snapshot = cex_common.get_upload_pool_snapshot()
@@ -394,7 +484,8 @@ def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr
     snapshot = cex_common.get_upload_pool_snapshot()
     section_row = 3
     subheader_row = 4
-    content_row = 5
+    observe_row = 5
+    content_row = 6
     draw_clipped_text(stdscr, section_row, 0, "上传管理", max_cols - 1, header_attr)
     summary_text = (
         f"状态: {'已初始化' if snapshot['startup_synced'] else '启动扫描中'} | "
@@ -404,6 +495,7 @@ def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr
         f"速度: {format_speed_text(snapshot['speed_bytes_per_second'])}"
     )
     draw_clipped_text(stdscr, subheader_row, 0, summary_text, max_cols - 1, warm_attr)
+    draw_clipped_text(stdscr, observe_row, 0, build_runtime_observe_text(max_cols - 1), max_cols - 1, title_attr)
     draw_clipped_text(stdscr, content_row, 0, "当前文件", max_cols - 1, header_attr)
     file_names = snapshot["file_names"] or ["当前无活跃上传"]
     row = content_row + 1
@@ -978,13 +1070,14 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         focus_attr = curses.A_REVERSE | curses.A_BOLD
         header_attr = curses.A_BOLD
         header_row = 0
-        tabs_row = 1
-        rule_row = 2
-        task_section_row = 3
-        task_subheader_row = 4
-        task_content_row = 5
+        observe_row = 1
+        tabs_row = 2
+        rule_row = 3
+        task_section_row = 4
+        task_subheader_row = 5
+        task_content_row = 6
         footer_row = max_rows - 1
-        if max_rows < 8 or max_cols < 60:
+        if max_rows < 9 or max_cols < 60:
             draw_clipped_text(stdscr, 0, 0, "窗口过小，请放大终端后查看。按 q 退出。", max_cols - 1, warm_attr)
             stdscr.refresh()
             key = stdscr.getch()
@@ -1009,6 +1102,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 f"存储: {app_config.DATA_STORAGE_MODE}"
             )
         draw_clipped_text(stdscr, header_row, 0, title_text, max_cols - 1, title_attr)
+        if max_rows > observe_row:
+            draw_clipped_text(stdscr, observe_row, 0, build_runtime_observe_text(max_cols - 1), max_cols - 1, warm_attr)
         if max_rows > tabs_row:
             tab_col = 0
             for idx, exchange in enumerate(exchanges):
@@ -1087,6 +1182,10 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if cex_config.is_supported(task.task_id, current_exchange):
                 if task.waiting_start:
                     status = "等待切换"
+                elif is_task_pause_requested(task.task_id, current_exchange):
+                    status = cex_config.PAUSE_REQUESTED_STATUS_TEXT
+                elif is_task_paused(task.task_id, current_exchange):
+                    status = cex_config.PAUSED_STATUS_TEXT
                 elif task.is_attached():
                     parent_task = task_map.get(ATTACHED_TASK_PARENTS[task.task_id])
                     status = "运行中" if parent_task and parent_task.is_running() else "已退出"
@@ -1103,6 +1202,10 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 status_attr = header_attr
             else:
                 if task.waiting_start:
+                    status_attr = warm_attr
+                elif status == cex_config.PAUSE_REQUESTED_STATUS_TEXT:
+                    status_attr = warm_attr
+                elif status == cex_config.PAUSED_STATUS_TEXT:
                     status_attr = warm_attr
                 elif task.is_attached():
                     parent_task = task_map.get(ATTACHED_TASK_PARENTS[task.task_id])
@@ -1345,7 +1448,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 if available <= 0:
                     break
                 draw_clipped_text(stdscr, target_row, log_col, text, available)
-        footer_text = "←→ 切交易所  ↑↓ 切选中项  Tab 切换焦点  PgUp/PgDn 翻状态  q 退出"
+        footer_text = "←→ 切交易所  ↑↓ 切选中项  Enter 启停模块  Tab 切换焦点  PgUp/PgDn 翻状态  q 退出"
         if footer_row > 0:
             draw_rule(stdscr, footer_row - 1, 0, max_cols - 1)
         draw_clipped_text(stdscr, footer_row, 0, footer_text, max_cols - 1, warm_attr)
@@ -1364,6 +1467,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 task_selected[current_exchange] -= 1
             if key == curses.KEY_DOWN:
                 task_selected[current_exchange] += 1
+            if key in {curses.KEY_ENTER, 10, 13} and exchange_tasks:
+                toggle_task_pause(exchange_tasks[task_selected[current_exchange]].task_id, current_exchange, logs, status_times)
             if exchange_tasks:
                 task_selected[current_exchange] = max(0, min(task_selected[current_exchange], len(exchange_tasks) - 1))
         else:

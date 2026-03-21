@@ -473,6 +473,9 @@ def sync_binance_month(symbol: str, missing_dates: list[str], fail_path: Path, s
         status_update("binance", symbol, (synced_days, f"月 {month_tag} {monthly_file}"))
         return synced_days, True
     for date_str in missing_dates:
+        if cex_config.apply_pause_if_requested(DATASET_ID, "binance"):
+            status_update("binance", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return synced_days, False
         daily_file = f"{symbol}-trades-{date_str}.zip"
         daily_url = f"{BINANCE_BUCKET_URL}/data/spot/daily/trades/{symbol}/{daily_file}"
         status_update("binance", symbol, (synced_days, f"日 {date_str} 请求中"))
@@ -534,6 +537,9 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
                 status_update("okx", symbol, (synced_days, f"月 {month_tag} {file_name}"))
                 return synced_days, True
     for day_text in missing_dates:
+        if cex_config.apply_pause_if_requested(DATASET_ID, "okx"):
+            status_update("okx", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return synced_days, False
         status_update("okx", symbol, (synced_days, f"日 {day_text} 请求中"))
         log(f"okx {symbol} 请求日包: {day_text}")
         try:
@@ -561,6 +567,9 @@ def sync_bybit_month(symbol: str, missing_dates: list[str], fail_path: Path, syn
     if not base_dir:
         return synced_days, True
     for date_str in missing_dates:
+        if cex_config.apply_pause_if_requested(DATASET_ID, "bybit"):
+            status_update("bybit", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return synced_days, False
         status_update("bybit", symbol, (synced_days, f"日 {date_str} 请求中"))
         if download_bybit_day(base_dir, symbol, date_str, fail_path):
             synced_days += 1
@@ -576,6 +585,9 @@ def sync_bitget_month(symbol: str, missing_dates: list[str], fail_path: Path, sy
     if not base_dir:
         return synced_days, True
     for date_str in missing_dates:
+        if cex_config.apply_pause_if_requested(DATASET_ID, "bitget"):
+            status_update("bitget", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return synced_days, False
         status_update("bitget", symbol, (synced_days, f"日 {date_str} 请求中"))
         log(f"bitget {symbol} 请求日包: {date_str}")
         if download_bitget_day(base_dir, symbol, date_str, fail_path):
@@ -592,6 +604,10 @@ def run_exchange(exchange: str, symbols: list, month_worker) -> None:
         for symbol in symbols:
             status_update(exchange, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for symbol in symbols:
+            status_update(exchange, symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     fail_path = build_fail_log_path()
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     if not base_dir:
@@ -603,6 +619,9 @@ def run_exchange(exchange: str, symbols: list, month_worker) -> None:
     month_anchor_dates = []
     end_date = end_dt.strftime("%Y-%m-%d")
     for symbol in symbols:
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, symbol, cex_config.PAUSED_STATUS_TEXT)
+            return
         start_date = cex_config.get_start_date(DATASET_ID, exchange, symbol)
         if not start_date:
             status_update(exchange, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
@@ -626,8 +645,15 @@ def run_exchange(exchange: str, symbols: list, month_worker) -> None:
     if not state_list:
         return
     for month_start_day in iter_months(min(month_anchor_dates), end_date):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            for state in state_list:
+                status_update(exchange, state["symbol"], cex_config.PAUSED_STATUS_TEXT)
+            return
         month_finish_day = min(end_date, month_end(month_start_day))
         for state in state_list:
+            if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+                status_update(exchange, state["symbol"], cex_config.PAUSED_STATUS_TEXT)
+                return
             month_missing_dates = [
                 date_text
                 for date_text in iter_dates(month_start_day, month_finish_day)
@@ -678,7 +704,7 @@ def main() -> None:
             thread.join()
         sleep_seconds = seconds_until_next_utc_4h()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
-        time.sleep(sleep_seconds)
+        cex_config.wait_with_task_control(sleep_seconds)
 
 
 def run() -> None:

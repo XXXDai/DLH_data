@@ -314,8 +314,15 @@ def run_bybit() -> None:
         for symbol in cex_config.get_insurance_symbols(exchange):
             status_update(exchange, "insurance", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for symbol in cex_config.get_insurance_symbols(exchange):
+            status_update(exchange, "insurance", symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for coin in cex_config.get_insurance_symbols(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "insurance", coin, cex_config.PAUSED_STATUS_TEXT)
+            return
         file_path = build_file_path(base_dir, coin)
         existing_count, latest_date = load_existing_sync_info(file_path)
         if latest_date:
@@ -341,8 +348,15 @@ def run_binance() -> None:
         for symbol in cex_config.get_insurance_symbols(exchange):
             status_update(exchange, "insurance", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for symbol in cex_config.get_insurance_symbols(exchange):
+            status_update(exchange, "insurance", symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "insurance", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return
         file_path = build_file_path(base_dir, symbol)
         existing_count, latest_date = load_existing_sync_info(file_path)
         if latest_date:
@@ -368,8 +382,15 @@ def run_bitget() -> None:
         for symbol in cex_config.get_insurance_symbols(exchange):
             status_update(exchange, "insurance", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for symbol in cex_config.get_insurance_symbols(exchange):
+            status_update(exchange, "insurance", symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "insurance", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return
         file_path = build_file_path(base_dir, symbol)
         existing_count, latest_date = load_existing_sync_info(file_path)
         if latest_date:
@@ -395,8 +416,15 @@ def run_okx() -> None:
         for symbol in cex_config.get_insurance_symbols(exchange):
             status_update(exchange, "insurance", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for symbol in cex_config.get_insurance_symbols(exchange):
+            status_update(exchange, "insurance", symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     for symbol in cex_config.get_insurance_symbols(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "insurance", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return
         file_path = build_file_path(base_dir, symbol)
         existing_count, latest_date = load_existing_sync_info(file_path)
         if latest_date:
@@ -437,7 +465,7 @@ def main() -> None:
             thread.join()
         sleep_seconds = seconds_until_next_utc_midnight()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
-        threading.Event().wait(sleep_seconds)
+        cex_config.wait_with_task_control(sleep_seconds)
 
 
 def run() -> None:

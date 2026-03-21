@@ -516,6 +516,8 @@ def process_followup_snapshot(exchange: str, market: str, symbol: str, date_str:
     output_dataset_id = followup_output_dataset_id_for_market(market)
     if not cex_config.is_supported(output_dataset_id, exchange):
         return
+    if cex_config.is_paused(output_dataset_id, exchange):
+        return
     cex_orderbook_snapshot_common.process_single_date(input_dataset_id, output_dataset_id, exchange, symbol, date_str)
 
 
@@ -536,6 +538,9 @@ def iter_symbol_failures(exchange: str, market: str, symbol: str) -> list[dict]:
 def sync_symbol(exchange: str, market: str, symbol: str) -> None:
     """同步单个交易对的历史订单簿归档。"""
     dataset_id = dataset_id_for_market(market)
+    if cex_config.apply_pause_if_requested(dataset_id, exchange):
+        status_update(exchange, market, symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     base_dir = data_dir_for_market(market, exchange)
     start_date = cex_config.get_start_date(dataset_id, exchange, symbol) or cex_config.get_min_start_date(dataset_id, exchange)
     if not base_dir or not start_date:
@@ -549,6 +554,9 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         done_count = count_existing_days(existing_dates, start_date, end_date)
     failures = iter_symbol_failures(exchange, market, symbol)
     for record in failures:
+        if cex_config.apply_pause_if_requested(dataset_id, exchange):
+            status_update(exchange, market, symbol, cex_config.PAUSED_STATUS_TEXT)
+            return
         date_str = str(record.get("目标") or "")
         if not date_str:
             continue
@@ -579,6 +587,9 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
     log_market(market, f"{exchange} {market} {symbol} 开始回补: {next_date} -> {end_date}")
     total = len(date_list)
     for index, date_str in enumerate(date_list, 1):
+        if cex_config.apply_pause_if_requested(dataset_id, exchange):
+            status_update(exchange, market, symbol, cex_config.PAUSED_STATUS_TEXT)
+            return
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} 请求中"))
         log_market(market, f"{exchange} {market} {symbol} 请求日包: {date_str}")
@@ -630,8 +641,12 @@ def run_market(market: str) -> None:
     while True:
         mark_unsupported_exchanges(market)
         for exchange in cex_config.get_supported_exchanges(dataset_id):
+            if cex_config.apply_pause_if_requested(dataset_id, exchange):
+                for symbol in resolve_symbols(exchange, market):
+                    status_update(exchange, market, symbol, cex_config.PAUSED_STATUS_TEXT)
+                continue
             for symbol in resolve_symbols(exchange, market):
                 sync_symbol(exchange, market, symbol)
         sleep_seconds = seconds_until_next_utc_4h()
         log_market(market, f"{market} 等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
-        time.sleep(sleep_seconds)
+        cex_config.wait_with_task_control(sleep_seconds)

@@ -364,7 +364,14 @@ def run_exchange(exchange: str) -> None:
         for symbol in cex_config.get_funding_symbols(exchange):
             status_update(exchange, "future", symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
+    if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        for symbol in cex_config.get_funding_symbols(exchange):
+            status_update(exchange, "future", symbol, cex_config.PAUSED_STATUS_TEXT)
+        return
     for symbol in cex_config.get_funding_symbols(exchange):
+        if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+            status_update(exchange, "future", symbol, cex_config.PAUSED_STATUS_TEXT)
+            return
         run_symbol(exchange, symbol)
 
 
@@ -381,7 +388,7 @@ def main() -> None:
         sleep_seconds = seconds_until_next_utc_midnight()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 00:00）")
         status_update("system", "future", "funding", f"等待 {sleep_seconds}s")
-        threading.Event().wait(sleep_seconds)
+        cex_config.wait_with_task_control(sleep_seconds)
 
 
 def run() -> None:

@@ -31,6 +31,9 @@ WS_RECV_TIMEOUT_SECONDS = 30  # WS接收超时，秒
 WS_RECONNECT_INTERVAL_SECONDS = 2  # WS重连间隔，秒
 WS_STATUS_INTERVAL_SECONDS = 1  # WS状态输出间隔，秒
 WS_PING_INTERVAL_SECONDS = 10  # WS心跳间隔，秒
+WS_WRITE_BUFFER_LINES = 256  # WS单文件写入缓冲行数阈值，行
+WS_WRITE_BUFFER_BYTES = 1024 * 1024  # WS单文件写入缓冲字节阈值，字节
+WS_WRITE_BUFFER_INTERVAL_SECONDS = 1  # WS单文件写入缓冲刷新间隔，秒
 WS_STANDBY_BUFFER_MAX_LINES = 100000  # WS待切换缓存每文件最大行数，行
 OLD_LAUNCHER_CHECK_INTERVAL_SECONDS = 0.5  # 旧版本启动器检测间隔，秒
 
@@ -43,7 +46,7 @@ SCHEDULER_TICK_SECONDS = 1  # 调度循环间隔，秒
 BATCH_SIZE = 2000  # 单文件最大记录数，条
 
 START_TASKS = []  # 启动任务列表，个数
-TUI_REFRESH_SECONDS = 0.1  # TUI刷新间隔，秒
+TUI_REFRESH_SECONDS = 0.5  # TUI刷新间隔，秒
 LOG_LINES_PER_TASK = 50  # 每任务日志行数，行
 ERROR_LOG_PATH = "logs/error.log"  # 错误日志路径，路径
 ERROR_LOG_KEYWORDS = ["错误", "异常", "Traceback", "Exception"]  # 错误关键词列表，个数

@@ -227,12 +227,18 @@ def run_exchange(exchange: str) -> None:
     """执行单个交易所聚合任务。"""
     if not cex_config.is_supported(OUTPUT_DATASET_ID, exchange):
         return
+    if cex_config.apply_pause_if_requested(OUTPUT_DATASET_ID, exchange):
+        return
     input_dir = cex_config.get_source_dir(INPUT_DATASET_ID, exchange)
     if not input_dir:
         return
     symbols = resolve_symbols(exchange, input_dir)
     for symbol in symbols:
+        if cex_config.apply_pause_if_requested(OUTPUT_DATASET_ID, exchange):
+            return
         for date_str in iter_available_dates(exchange, input_dir, symbol):
+            if cex_config.apply_pause_if_requested(OUTPUT_DATASET_ID, exchange):
+                return
             process_date(exchange, symbol, date_str)
 
 
@@ -243,7 +249,7 @@ def main() -> None:
             run_exchange(exchange)
         sleep_seconds = seconds_until_next_utc_4h()
         log(f"等待 {sleep_seconds} 秒后再次执行（UTC 4小时倍数）")
-        time.sleep(sleep_seconds)
+        cex_config.wait_with_task_control(sleep_seconds)
 
 
 def run() -> None:
