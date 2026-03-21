@@ -7,6 +7,7 @@ import gzip
 import json
 import re
 import socket
+import sys
 import threading
 import time
 import zipfile
@@ -73,6 +74,40 @@ def status_update(exchange: str, symbol: str, value) -> None:
     """更新现货成交状态。"""
     if STATUS_HOOK:
         STATUS_HOOK(cex_config.get_status_key(exchange, "spot", symbol), value)
+
+
+def update_memory_metrics(exchange: str, phase: str, archive_bytes: int, grouped_bytes: int, row_count: int, group_count: int) -> None:
+    """更新现货成交下载的内存观测。"""
+    cex_config.update_runtime_memory_metrics(
+        DATASET_ID,
+        exchange,
+        {
+            "phase": phase,
+            "archive_bytes": archive_bytes,
+            "grouped_bytes": grouped_bytes,
+            "row_count": row_count,
+            "group_count": group_count,
+        },
+    )
+
+
+def clear_memory_metrics(exchange: str) -> None:
+    """清理现货成交下载的内存观测。"""
+    cex_config.clear_runtime_memory_metrics(DATASET_ID, exchange)
+
+
+def estimate_rows_by_date_memory(rows_by_date: dict) -> tuple[int, int, int]:
+    """估算按日期分组记录的内存占用。"""
+    total_bytes = sys.getsizeof(rows_by_date)
+    total_rows = 0
+    total_groups = len(rows_by_date)
+    for date_str, rows in rows_by_date.items():
+        total_bytes += sys.getsizeof(date_str)
+        total_bytes += sys.getsizeof(rows)
+        total_rows += len(rows)
+        for row in rows:
+            total_bytes += sys.getsizeof(row)
+    return total_bytes, total_rows, total_groups
 
 
 def build_fail_log_path() -> Path:
@@ -349,6 +384,8 @@ def split_binance_zip(content: bytes, symbol: str, base_dir: Path) -> int:
                 if normalized:
                     date_str, row = normalized
                     rows_by_date[date_str].append(row)
+    grouped_bytes, total_rows, total_groups = estimate_rows_by_date_memory(rows_by_date)
+    update_memory_metrics("binance", "月包拆分", len(content), grouped_bytes, total_rows, total_groups)
     return write_daily_rows(base_dir, symbol, rows_by_date)
 
 
@@ -364,17 +401,22 @@ def split_okx_zip(content: bytes, symbol: str, base_dir: Path) -> int:
                 if normalized:
                     date_str, item = normalized
                     rows_by_date[date_str].append(item)
+    grouped_bytes, total_rows, total_groups = estimate_rows_by_date_memory(rows_by_date)
+    update_memory_metrics("okx", "月包拆分", len(content), grouped_bytes, total_rows, total_groups)
     return write_daily_rows(base_dir, symbol, rows_by_date)
 
 
 def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
     """下载并拆分Binance成交归档。"""
     try:
+        update_memory_metrics("binance", "下载月包", 0, 0, 0, 0)
         content = download_bytes(url, TIMEOUT_SECONDS)
     except RuntimeError as exc:
         append_failure(fail_path, failure_key, "binance", symbol, url, str(exc))
         return False
+    update_memory_metrics("binance", "下载完成", len(content), 0, 0, 0)
     count = split_binance_zip(content, symbol, base_dir)
+    update_memory_metrics("binance", "写入完成", 0, 0, 0, 0)
     clear_failure(fail_path, failure_key)
     log(f"binance {symbol} 已写入记录数: {count}")
     return True
@@ -383,11 +425,14 @@ def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key:
 def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
     """下载并拆分OKX成交归档。"""
     try:
+        update_memory_metrics("okx", "下载月包", 0, 0, 0, 0)
         content = download_bytes(url, TIMEOUT_SECONDS)
     except RuntimeError as exc:
         append_failure(fail_path, failure_key, "okx", symbol, url, str(exc))
         return False
+    update_memory_metrics("okx", "下载完成", len(content), 0, 0, 0)
     count = split_okx_zip(content, symbol, base_dir)
+    update_memory_metrics("okx", "写入完成", 0, 0, 0, 0)
     clear_failure(fail_path, failure_key)
     log(f"okx {symbol} 已写入记录数: {count}")
     return True
@@ -601,16 +646,19 @@ def sync_bitget_month(symbol: str, missing_dates: list[str], fail_path: Path, sy
 def run_exchange(exchange: str, symbols: list, month_worker) -> None:
     """按月执行单个交易所同步。"""
     if not cex_config.is_supported(DATASET_ID, exchange):
+        clear_memory_metrics(exchange)
         for symbol in symbols:
             status_update(exchange, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
     if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
+        clear_memory_metrics(exchange)
         for symbol in symbols:
             status_update(exchange, symbol, cex_config.PAUSED_STATUS_TEXT)
         return
     fail_path = build_fail_log_path()
     base_dir = cex_config.get_source_dir(DATASET_ID, exchange)
     if not base_dir:
+        clear_memory_metrics(exchange)
         return
     end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
     if end_dt < datetime(2000, 1, 1):
@@ -643,6 +691,7 @@ def run_exchange(exchange: str, symbols: list, month_worker) -> None:
         state_list.append({"symbol": symbol, "missing_dates": set(missing_dates), "synced_days": synced_days})
         month_anchor_dates.append(next_date)
     if not state_list:
+        clear_memory_metrics(exchange)
         return
     for month_start_day in iter_months(min(month_anchor_dates), end_date):
         if cex_config.apply_pause_if_requested(DATASET_ID, exchange):
@@ -671,6 +720,7 @@ def run_exchange(exchange: str, symbols: list, month_worker) -> None:
                 return
             for date_text in month_missing_dates:
                 state["missing_dates"].discard(date_text)
+    clear_memory_metrics(exchange)
 
 
 def main() -> None:

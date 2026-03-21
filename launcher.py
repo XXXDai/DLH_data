@@ -463,6 +463,40 @@ def build_runtime_observe_text(max_cells: int) -> str:
     return truncate_by_cells(text, max_cells)
 
 
+def build_task_runtime_observe_text(task_id: str, exchange: str, max_cells: int) -> str:
+    """构造任务级运行时观测文本。"""
+    if task_id == "D10002-4":
+        snapshot = cex_orderbook_ws_common.get_market_buffer_snapshot("future")
+        text = (
+            f"任务观测: WS缓存 future {snapshot['file_count']}文件/{snapshot['line_count']}行"
+            f" | 丢弃 {snapshot['dropped_count']}行"
+        )
+        return truncate_by_cells(text, max_cells)
+    if task_id == "D10006-8":
+        snapshot = cex_orderbook_ws_common.get_market_buffer_snapshot("spot")
+        text = (
+            f"任务观测: WS缓存 spot {snapshot['file_count']}文件/{snapshot['line_count']}行"
+            f" | 丢弃 {snapshot['dropped_count']}行"
+        )
+        return truncate_by_cells(text, max_cells)
+    metrics = cex_config.get_runtime_memory_metrics(task_id, exchange)
+    if not metrics:
+        return ""
+    phase_text = str(metrics.get("phase") or "-")
+    archive_text = format_bytes_text(int(metrics.get("archive_bytes") or 0))
+    grouped_text = format_bytes_text(int(metrics.get("grouped_bytes") or 0))
+    row_text = str(int(metrics.get("row_count") or 0))
+    group_text = str(int(metrics.get("group_count") or 0))
+    text = (
+        f"任务观测: 阶段 {phase_text} | "
+        f"压缩包 {archive_text} | "
+        f"分组占用 {grouped_text} | "
+        f"行数 {row_text} | "
+        f"分组 {group_text}"
+    )
+    return truncate_by_cells(text, max_cells)
+
+
 def build_upload_pool_text(max_cells: int) -> str:
     """构造上传池状态文本。"""
     snapshot = cex_common.get_upload_pool_snapshot()
@@ -1143,7 +1177,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         task_rule_row = min(footer_row - 1, task_content_row + task_visible_rows)
         detail_section_row = task_rule_row + 1
         detail_subheader_row = detail_section_row + 1
-        detail_content_row = detail_section_row + 2
+        detail_observe_row = detail_section_row + 2
+        detail_content_row = detail_section_row + 3
         if max_rows > task_section_row:
             task_scroll = task_scroll_map.get(current_exchange, 0)
             if task_selected[current_exchange] < task_scroll:
@@ -1266,6 +1301,9 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 synced_until_text = get_synced_until_text(current.task_id, get_status_bucket_for_exchange(current.task_id, current_exchange, status_counts))
                 schedule_header = f"倒计时: {countdown_text} | 下次触发(UTC): {next_text} | 已同步到: {synced_until_text}"
                 draw_clipped_text(stdscr, detail_subheader_row, log_col, schedule_header, log_width, warm_attr)
+                observe_text = build_task_runtime_observe_text(current.task_id, current_exchange, log_width)
+                if observe_text:
+                    draw_clipped_text(stdscr, detail_observe_row, log_col, observe_text, log_width, title_attr)
             status_items = []
             ws_tasks = {"D10002-4", "D10006-8", "D10022-23"}
             if current.task_id in {"D10001", "D10005", "D10011", "D10012", "D10013", "D10014", "D10017", "D10018", "D10019", "D10002-4", "D10006-8"}:
