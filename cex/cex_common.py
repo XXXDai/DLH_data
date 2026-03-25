@@ -146,6 +146,38 @@ def download_bytes(url: str, timeout_seconds: int) -> bytes:
         raise RuntimeError("下载失败: 超时") from exc
 
 
+def download_to_file(url: str, timeout_seconds: int, output_path: Path) -> int:
+    """下载二进制内容并流式写入文件。"""
+    ensure_parent(output_path)
+    total_bytes = 0
+    try:
+        with urlopen(url, timeout=timeout_seconds) as response:
+            with output_path.open("wb") as file_obj:
+                while True:
+                    chunk = response.read(app_config.CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    file_obj.write(chunk)
+                    total_bytes += len(chunk)
+        return total_bytes
+    except HTTPError as exc:
+        if output_path.exists():
+            output_path.unlink()
+        raise RuntimeError(f"下载失败: HTTP {exc.code}") from exc
+    except URLError as exc:
+        if output_path.exists():
+            output_path.unlink()
+        raise RuntimeError("下载失败: 网络错误") from exc
+    except TimeoutError as exc:
+        if output_path.exists():
+            output_path.unlink()
+        raise RuntimeError("下载失败: 超时") from exc
+    except socket.timeout as exc:
+        if output_path.exists():
+            output_path.unlink()
+        raise RuntimeError("下载失败: 超时") from exc
+
+
 def ensure_parent(path: Path) -> None:
     """确保目标父目录存在。"""
     path.parent.mkdir(parents=True, exist_ok=True)

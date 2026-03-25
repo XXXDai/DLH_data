@@ -123,6 +123,7 @@ ATTACHED_TASK_PARENTS = {
 }  # 附属任务父任务映射，映射
 WS_TASK_IDS = {"D10002-4", "D10006-8"}  # WS任务标识集合，个数
 EXIT_REQUESTED = threading.Event()  # 退出请求事件，事件
+RUNTIME_OBSERVE_CACHE = {"ts": 0.0, "text": ""}  # 运行时观测缓存，映射
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -449,6 +450,10 @@ def read_process_peak_rss_bytes() -> int:
 
 def build_runtime_observe_text(max_cells: int) -> str:
     """构造运行时观测文本。"""
+    now_ts = time.time()
+    cached_text = str(RUNTIME_OBSERVE_CACHE["text"])
+    if cached_text and now_ts - float(RUNTIME_OBSERVE_CACHE["ts"]) < 1.0:
+        return truncate_by_cells(cached_text, max_cells)
     rss_text = format_bytes_text(read_process_rss_bytes())
     peak_text = format_bytes_text(read_process_peak_rss_bytes())
     ws_snapshot = cex_orderbook_ws_common.get_all_market_buffer_snapshots()
@@ -460,6 +465,8 @@ def build_runtime_observe_text(max_cells: int) -> str:
         f"WS缓存 future {future_snapshot['file_count']}文件/{future_snapshot['line_count']}行 | "
         f"spot {spot_snapshot['file_count']}文件/{spot_snapshot['line_count']}行"
     )
+    RUNTIME_OBSERVE_CACHE["ts"] = now_ts
+    RUNTIME_OBSERVE_CACHE["text"] = text
     return truncate_by_cells(text, max_cells)
 
 

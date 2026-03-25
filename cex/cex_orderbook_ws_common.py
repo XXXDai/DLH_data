@@ -880,7 +880,7 @@ def write_json_line(writer, payload: dict):
     """写入单行JSON记录。"""
     line = json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
     writer[3].append(line)
-    writer[4] += len(line.encode("utf-8"))
+    writer[4] += len(line)
     now_ts = time.monotonic()
     if (
         len(writer[3]) >= WRITE_BUFFER_LINES

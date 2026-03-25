@@ -18,7 +18,9 @@ from urllib.request import urlopen
 
 import app_config
 from cex import cex_config
+from cex.cex_common import build_part_path
 from cex.cex_common import download_bytes
+from cex.cex_common import download_to_file
 from cex.cex_common import count_existing_days
 from cex.cex_common import get_synced_until_date
 from cex.cex_common import is_valid_gzip_file
@@ -145,6 +147,13 @@ def build_okx_delivery_state_path(base_dir: Path, family: str, date_str: str) ->
 def build_bitget_output_path(base_dir: Path, symbol: str, shard_name: str) -> Path:
     """构造Bitget原始分片路径。"""
     return base_dir / symbol / shard_name
+
+
+def build_archive_temp_path(failure_key: str, url: str) -> Path:
+    """构造归档下载临时文件路径。"""
+    file_name = url.rsplit("/", 1)[-1].split("?", 1)[0] or "archive.zip"
+    safe_key = re.sub(r"[^A-Za-z0-9._-]+", "_", failure_key)
+    return FAIL_LOG_DIR / "__tmp" / f"{safe_key}_{file_name}.part"
 
 
 def append_failure(fail_path: Path, failure_key: str, exchange: str, symbol: str, target: str, message: str) -> None:
@@ -429,10 +438,49 @@ def append_rows_to_temp_file(file_path: Path, rows: list[dict]) -> int:
     return len(rows)
 
 
-def split_binance_zip(content: bytes, symbol: str, base_dir: Path) -> int:
+def open_gzip_csv_writer(file_path: Path, fieldnames: list[str]) -> tuple:
+    """打开GZip临时CSV写入器。"""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_obj = gzip.open(file_path, "wt", encoding="utf-8", newline="")
+    writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
+    writer.writeheader()
+    return file_obj, writer
+
+
+def open_gzip_csv_append_writer(file_path: Path, fieldnames: list[str]) -> tuple:
+    """打开GZip追加CSV写入器。"""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = file_path.exists()
+    file_obj = gzip.open(file_path, "at" if file_exists else "wt", encoding="utf-8", newline="")
+    writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
+    if not file_exists:
+        writer.writeheader()
+    return file_obj, writer
+
+
+def close_gzip_csv_writers(writer_handles: dict) -> None:
+    """关闭全部GZip临时CSV写入器。"""
+    for file_obj in writer_handles.values():
+        file_obj.close()
+
+
+def finalize_temp_outputs(temp_output_paths: dict[Path, Path]) -> None:
+    """校验并替换全部临时输出文件。"""
+    for output_path, tmp_path in temp_output_paths.items():
+        if not is_valid_gzip_file(tmp_path):
+            tmp_path.unlink()
+            raise RuntimeError(f"压缩文件校验失败: {output_path}")
+        replace_output_file(tmp_path, output_path)
+
+
+def split_binance_zip(archive_path: Path, symbol: str, base_dir: Path) -> int:
     """拆分Binance压缩期货成交文件。"""
-    rows_by_date = defaultdict(list)
-    with zipfile.ZipFile(BytesIO(content), "r") as zf:
+    writer_handles = {}
+    csv_writers = {}
+    temp_output_paths = {}
+    written_rows = 0
+    archive_size = archive_path.stat().st_size
+    with zipfile.ZipFile(archive_path, "r") as zf:
         name = zf.namelist()[0]
         with zf.open(name) as f:
             reader = csv.reader(TextIOWrapper(f, encoding="utf-8"))
@@ -440,16 +488,38 @@ def split_binance_zip(content: bytes, symbol: str, base_dir: Path) -> int:
                 normalized = normalize_binance_future_parts(symbol, parts)
                 if normalized:
                     date_str, row = normalized
-                    rows_by_date[date_str].append(row)
-    grouped_bytes, total_rows, total_groups = estimate_rows_by_date_memory(rows_by_date)
-    update_memory_metrics("binance", "月包拆分", len(content), grouped_bytes, total_rows, total_groups)
-    return write_daily_rows(base_dir, symbol, rows_by_date)
+                    output_path = build_output_path(base_dir, symbol, date_str)
+                    if output_path.exists():
+                        continue
+                    writer = csv_writers.get(output_path)
+                    if writer is None:
+                        tmp_path = build_part_path(output_path)
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                        file_obj, writer = open_gzip_csv_writer(tmp_path, FUTURE_TRADE_FIELDS)
+                        writer_handles[output_path] = file_obj
+                        csv_writers[output_path] = writer
+                        temp_output_paths[output_path] = tmp_path
+                    writer.writerow(row)
+                    written_rows += 1
+                    if written_rows % 10000 == 0:
+                        grouped_bytes = sys.getsizeof(csv_writers) + sys.getsizeof(writer_handles) + sys.getsizeof(temp_output_paths)
+                        update_memory_metrics("binance", "月包拆分", archive_size, grouped_bytes, written_rows, len(csv_writers))
+    close_gzip_csv_writers(writer_handles)
+    finalize_temp_outputs(temp_output_paths)
+    grouped_bytes = sys.getsizeof(csv_writers) + sys.getsizeof(writer_handles) + sys.getsizeof(temp_output_paths)
+    update_memory_metrics("binance", "月包拆分", archive_size, grouped_bytes, written_rows, len(csv_writers))
+    return written_rows
 
 
-def split_okx_zip(content: bytes, base_dir: Path) -> int:
+def split_okx_zip(archive_path: Path, base_dir: Path) -> int:
     """拆分OKX压缩期货成交文件。"""
-    rows_by_symbol = defaultdict(lambda: defaultdict(list))
-    with zipfile.ZipFile(BytesIO(content), "r") as zf:
+    writer_handles = {}
+    csv_writers = {}
+    temp_output_paths = {}
+    written_rows = 0
+    archive_size = archive_path.stat().st_size
+    with zipfile.ZipFile(archive_path, "r") as zf:
         name = zf.namelist()[0]
         with zf.open(name) as f:
             reader = csv.DictReader(TextIOWrapper(f, encoding="utf-8"))
@@ -457,22 +527,44 @@ def split_okx_zip(content: bytes, base_dir: Path) -> int:
                 normalized = normalize_okx_future_trade_row(row)
                 if normalized:
                     date_str, item = normalized
-                    rows_by_symbol[item["symbol"]][date_str].append(item)
-    grouped_bytes, total_rows, total_groups = estimate_rows_by_symbol_memory(rows_by_symbol)
-    update_memory_metrics("okx", "月包拆分", len(content), grouped_bytes, total_rows, total_groups)
-    return write_daily_rows_by_symbol(base_dir, rows_by_symbol)
+                    output_path = build_output_path(base_dir, item["symbol"], date_str)
+                    if output_path.exists():
+                        continue
+                    writer = csv_writers.get(output_path)
+                    if writer is None:
+                        tmp_path = build_part_path(output_path)
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                        file_obj, writer = open_gzip_csv_writer(tmp_path, FUTURE_TRADE_FIELDS)
+                        writer_handles[output_path] = file_obj
+                        csv_writers[output_path] = writer
+                        temp_output_paths[output_path] = tmp_path
+                    writer.writerow(item)
+                    written_rows += 1
+                    if written_rows % 10000 == 0:
+                        grouped_bytes = sys.getsizeof(csv_writers) + sys.getsizeof(writer_handles) + sys.getsizeof(temp_output_paths)
+                        update_memory_metrics("okx", "月包拆分", archive_size, grouped_bytes, written_rows, len(csv_writers))
+    close_gzip_csv_writers(writer_handles)
+    finalize_temp_outputs(temp_output_paths)
+    grouped_bytes = sys.getsizeof(csv_writers) + sys.getsizeof(writer_handles) + sys.getsizeof(temp_output_paths)
+    update_memory_metrics("okx", "月包拆分", archive_size, grouped_bytes, written_rows, len(csv_writers))
+    return written_rows
 
 
 def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
     """下载并拆分Binance期货成交归档。"""
+    archive_path = build_archive_temp_path(failure_key, url)
+    if archive_path.exists():
+        archive_path.unlink()
     try:
         update_memory_metrics("binance", "下载月包", 0, 0, 0, 0)
-        content = download_bytes(url, TIMEOUT_SECONDS)
+        archive_bytes = download_to_file(url, TIMEOUT_SECONDS, archive_path)
     except RuntimeError as exc:
         append_failure(fail_path, failure_key, "binance", symbol, url, str(exc))
         return False
-    update_memory_metrics("binance", "下载完成", len(content), 0, 0, 0)
-    count = split_binance_zip(content, symbol, base_dir)
+    update_memory_metrics("binance", "下载完成", archive_bytes, 0, 0, 0)
+    count = split_binance_zip(archive_path, symbol, base_dir)
+    archive_path.unlink()
     update_memory_metrics("binance", "写入完成", 0, 0, 0, 0)
     clear_failure(fail_path, failure_key)
     log(f"binance {symbol} 已写入记录数: {count}")
@@ -481,14 +573,18 @@ def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key:
 
 def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
     """下载并拆分OKX期货成交归档。"""
+    archive_path = build_archive_temp_path(failure_key, url)
+    if archive_path.exists():
+        archive_path.unlink()
     try:
         update_memory_metrics("okx", "下载月包", 0, 0, 0, 0)
-        content = download_bytes(url, TIMEOUT_SECONDS)
+        archive_bytes = download_to_file(url, TIMEOUT_SECONDS, archive_path)
     except RuntimeError as exc:
         append_failure(fail_path, failure_key, "okx", symbol, url, str(exc))
         return False
-    update_memory_metrics("okx", "下载完成", len(content), 0, 0, 0)
-    count = split_okx_zip(content, base_dir)
+    update_memory_metrics("okx", "下载完成", archive_bytes, 0, 0, 0)
+    count = split_okx_zip(archive_path, base_dir)
+    archive_path.unlink()
     update_memory_metrics("okx", "写入完成", 0, 0, 0, 0)
     clear_failure(fail_path, failure_key)
     log(f"okx {symbol} 已写入记录数: {count}")
@@ -523,6 +619,7 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
     tmp_path = output_path.with_name(output_path.name + ".part")
     if tmp_path.exists():
         tmp_path.unlink()
+    tmp_file_obj, tmp_writer = open_gzip_csv_append_writer(tmp_path, FUTURE_TRADE_FIELDS)
     shard_count = 0
     row_count = 0
     for index in range(1, BITGET_MAX_FILE_INDEX + 1):
@@ -532,15 +629,19 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
         try:
             content = download_bitget_bytes(url)
         except RuntimeError as exc:
+            tmp_file_obj.close()
             append_failure(fail_path, failure_key, "bitget", symbol, url, str(exc))
             return False
         if content is None:
             if shard_count == 0:
+                tmp_file_obj.close()
                 clear_failure(fail_path, failure_key)
                 return False
             if row_count == 0:
+                tmp_file_obj.close()
                 clear_failure(fail_path, failure_key)
                 return False
+            tmp_file_obj.close()
             if not is_valid_gzip_file(tmp_path):
                 tmp_path.unlink()
                 append_failure(fail_path, failure_key, "bitget", symbol, date_str, "生成文件损坏")
@@ -549,7 +650,6 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
             clear_failure(fail_path, failure_key)
             log(f"bitget {symbol} {date_str} 已写入记录数: {row_count}")
             return True
-        rows = []
         with zipfile.ZipFile(BytesIO(content), "r") as zf:
             name = zf.namelist()[0]
             with zf.open(name) as f:
@@ -557,11 +657,12 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
                 for row in reader:
                     normalized = normalize_bitget_future_trade_row(symbol, row)
                     if normalized:
-                        rows.append(normalized[1])
-        row_count += append_rows_to_temp_file(tmp_path, rows)
+                        tmp_writer.writerow(normalized[1])
+                        row_count += 1
         shard_count += 1
         time.sleep(REQUEST_MIN_INTERVAL_SECONDS)
     if row_count > 0:
+        tmp_file_obj.close()
         if not is_valid_gzip_file(tmp_path):
             tmp_path.unlink()
             append_failure(fail_path, failure_key, "bitget", symbol, date_str, "生成文件损坏")
@@ -570,6 +671,7 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
         log(f"bitget {symbol} {date_str} 已写入记录数: {row_count}")
         clear_failure(fail_path, failure_key)
         return True
+    tmp_file_obj.close()
     clear_failure(fail_path, failure_key)
     return False
 
