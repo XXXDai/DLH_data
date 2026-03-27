@@ -344,6 +344,17 @@ def is_valid_archive(file_path: Path) -> bool:
     return False
 
 
+def is_valid_snapshot_output(file_path: Path) -> bool:
+    """判断快照输出是否包含有效记录。"""
+    if not file_path.exists():
+        return False
+    if file_path.suffix != ".parquet":
+        return False
+    if file_path.stat().st_size == 0:
+        return False
+    return pq.ParquetFile(file_path).metadata.num_rows > 0
+
+
 def process_date(input_dataset_id: str, output_dataset_id: str, exchange: str, input_dir: Path, output_dir: Path, symbol: str, date_str: str) -> None:
     """处理单日订单簿归档。"""
     input_path = build_input_path(input_dataset_id, exchange, input_dir, symbol, date_str)
@@ -355,7 +366,7 @@ def process_date(input_dataset_id: str, output_dataset_id: str, exchange: str, i
         return
     output_path = build_output_path(input_dataset_id, exchange, output_dir, symbol, date_str)
     cleanup_stale_part_file(output_path)
-    if storage_file_exists(output_path):
+    if storage_file_exists(output_path) and (not output_path.exists() or is_valid_snapshot_output(output_path)):
         return
     tmp_output_path = build_part_path(output_path)
     if tmp_output_path.exists():
@@ -387,6 +398,10 @@ def process_date(input_dataset_id: str, output_dataset_id: str, exchange: str, i
     if batch:
         write_parquet(batch, writer, schema)
     writer.close()
+    if total <= 0:
+        tmp_output_path.unlink()
+        log(output_dataset_id, f"无有效快照，已跳过: {output_path}")
+        return
     replace_output_file(tmp_output_path, output_path)
     log(output_dataset_id, f"已写入: {output_path}，记录数: {total}")
 

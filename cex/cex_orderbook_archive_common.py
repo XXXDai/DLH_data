@@ -243,9 +243,60 @@ def build_okx_normalized_message(symbol: str, action: str, item: dict) -> dict:
     }
 
 
-def convert_okx_tar_to_zip(raw_path: Path, output_path: Path, symbol: str) -> None:
+def normalize_okx_action(action: str) -> str | None:
+    """归一化OKX动作类型。"""
+    if action in {"snapshot", "partial"}:
+        return "snapshot"
+    if action in {"update", "delta"}:
+        return "update"
+    return None
+
+
+def resolve_okx_message_symbol(message: dict, fallback_symbol: str) -> str:
+    """解析OKX消息中的交易对。"""
+    arg = message.get("arg", {})
+    if isinstance(arg, dict) and arg.get("instId"):
+        return str(arg["instId"])
+    for key in ("instId", "symbol", "s"):
+        value = message.get(key)
+        if value:
+            return str(value)
+    return fallback_symbol
+
+
+def normalize_okx_data_items(message: dict) -> list[dict]:
+    """提取OKX消息中的盘口对象列表。"""
+    data = message.get("data", [])
+    if isinstance(data, dict):
+        return [data]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def iter_okx_normalized_messages(message: dict, fallback_symbol: str):
+    """遍历OKX消息归一化后的结果。"""
+    symbol = resolve_okx_message_symbol(message, fallback_symbol)
+    action = normalize_okx_action(str(message.get("action", "")))
+    if action:
+        data_items = normalize_okx_data_items(message)
+        if data_items:
+            for item in data_items:
+                yield build_okx_normalized_message(symbol, action, item)
+            return
+        if isinstance(message.get("bids"), list) and isinstance(message.get("asks"), list):
+            yield build_okx_normalized_message(symbol, action, message)
+            return
+    for item in normalize_okx_data_items(message):
+        item_action = normalize_okx_action(str(item.get("action", "")))
+        if item_action:
+            yield build_okx_normalized_message(resolve_okx_message_symbol(item, symbol), item_action, item)
+
+
+def convert_okx_tar_to_zip(raw_path: Path, output_path: Path, symbol: str) -> int:
     """将OKX原始tar归一化为Bybit样式zip。"""
     inner_name = f"{symbol}.json"
+    written_count = 0
     with tarfile.open(raw_path, "r:gz") as tar_file, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
         with zip_file.open(inner_name, "w") as zip_obj:
             for member in tar_file.getmembers():
@@ -256,13 +307,11 @@ def convert_okx_tar_to_zip(raw_path: Path, output_path: Path, symbol: str) -> No
                     continue
                 for line in file_obj:
                     message = orjson.loads(line)
-                    action = message.get("action", "")
-                    if action not in {"snapshot", "update"}:
-                        continue
-                    for item in message.get("data", []):
-                        normalized = build_okx_normalized_message(message.get("arg", {}).get("instId", symbol), action, item)
+                    for normalized in iter_okx_normalized_messages(message, symbol):
                         zip_obj.write(orjson.dumps(normalized))
                         zip_obj.write(b"\n")
+                        written_count += 1
+    return written_count
 
 
 def download_okx_normalized(url: str, output_path: Path, symbol: str) -> tuple[bool, str]:
@@ -311,9 +360,13 @@ def download_okx_normalized(url: str, output_path: Path, symbol: str) -> tuple[b
             else:
                 if zip_tmp_path.exists():
                     zip_tmp_path.unlink()
-                convert_okx_tar_to_zip(raw_tmp_path, zip_tmp_path, symbol)
+                written_count = convert_okx_tar_to_zip(raw_tmp_path, zip_tmp_path, symbol)
                 raw_tmp_path.unlink()
-                if not zipfile.is_zipfile(zip_tmp_path):
+                if written_count <= 0:
+                    if zip_tmp_path.exists():
+                        zip_tmp_path.unlink()
+                    last_error = "归一化后无有效消息"
+                elif not zipfile.is_zipfile(zip_tmp_path):
                     zip_tmp_path.unlink()
                     last_error = "归档不是有效zip"
                 else:
@@ -420,6 +473,25 @@ def is_valid_archive(output_path: Path) -> bool:
     return False
 
 
+def has_nonempty_zip_payload(output_path: Path) -> bool:
+    """检查zip中是否至少包含一条消息。"""
+    with zipfile.ZipFile(output_path, "r") as zip_file:
+        names = [name for name in zip_file.namelist() if not name.endswith("/")]
+        if not names:
+            return False
+        with zip_file.open(names[0], "r") as file_obj:
+            return bool(file_obj.readline())
+
+
+def is_valid_download_output(exchange: str, output_path: Path) -> bool:
+    """检查下载输出文件是否可作为有效断点。"""
+    if not is_valid_archive(output_path):
+        return False
+    if exchange == "okx" and output_path.name.endswith("_ob400.data.zip"):
+        return has_nonempty_zip_payload(output_path)
+    return True
+
+
 def invalid_archive_message(output_path: Path) -> str:
     """返回归档校验失败提示。"""
     if output_path.name.endswith(".tar.gz") or output_path.name.endswith(".tar.gz.part"):
@@ -495,7 +567,7 @@ def download_date(exchange: str, market: str, symbol: str, date_str: str) -> boo
         return False
     output_path = build_output_path(exchange, market, base_dir, symbol, date_str)
     cleanup_stale_part_file(output_path)
-    if storage_file_exists(output_path) and (not output_path.exists() or is_valid_archive(output_path)):
+    if storage_file_exists(output_path) and (not output_path.exists() or is_valid_download_output(exchange, output_path)):
         clear_failure(exchange, market, symbol, date_str)
         return True
     url = build_url(exchange, market, symbol, date_str)
