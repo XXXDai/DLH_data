@@ -297,8 +297,8 @@ def convert_okx_tar_to_zip(raw_path: Path, output_path: Path, symbol: str) -> in
     """将OKX原始tar归一化为Bybit样式zip。"""
     inner_name = f"{symbol}.json"
     written_count = 0
-    with tarfile.open(raw_path, "r:gz") as tar_file, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        with zip_file.open(inner_name, "w") as zip_obj:
+    with tarfile.open(raw_path, "r:gz") as tar_file, zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zip_file:
+        with zip_file.open(inner_name, "w", force_zip64=True) as zip_obj:
             for member in tar_file.getmembers():
                 if not member.isfile():
                     continue
