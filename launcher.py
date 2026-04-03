@@ -41,6 +41,11 @@ def has_remove_flag() -> bool:
     return "-rm" in sys.argv
 
 
+def has_s3_only_flag() -> bool:
+    """判断是否仅启动S3上传模式。"""
+    return "-s3" in sys.argv and "-only" in sys.argv
+
+
 def resolve_process_cwd(pid: int) -> str:
     """解析目标进程的工作目录。"""
     proc_cwd_path = Path(f"/proc/{pid}/cwd")
@@ -939,6 +944,12 @@ def render_pre_tui(startup_progress: dict) -> None:
 def start_tasks(selected: list | None = None, startup_progress: dict | None = None) -> tuple[list, dict, dict, dict, dict, dict]:
     """启动全部任务并返回运行时容器。"""
     update_startup_progress(startup_progress, "加载任务定义", 0, len(TASK_DEFS), "准备构建任务列表")
+    if has_s3_only_flag():
+        if app_config.DATA_STORAGE_MODE == "s3":
+            update_startup_progress(startup_progress, "初始化上传池", 0, 1, "仅上传模式，准备检查S3启动状态")
+            cex_common.ensure_upload_workers_started()
+        update_startup_progress(startup_progress, "启动完成", 1, 1, "仅上传模式，未启动抓取任务")
+        return [], {}, {}, {}, {}, {}
     tasks = filter_tasks(build_tasks(), selected or app_config.START_TASKS)
     if not tasks:
         print("未配置启动任务")
@@ -1570,7 +1581,7 @@ def main() -> None:
     render_pre_tui(startup_progress)
     time.sleep(app_config.TUI_REFRESH_SECONDS)
     tasks, status_counts, status_times, status_meta, logs, pending = startup_progress["result"]
-    if tasks:
+    if tasks or has_s3_only_flag():
         curses.wrapper(run_tui, tasks, status_counts, status_times, status_meta, logs, pending)
     restore_stdio()
     sys.__stdout__.write("\n")
