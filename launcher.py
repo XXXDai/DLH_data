@@ -133,6 +133,8 @@ RUNTIME_OBSERVE_CACHE = {"ts": 0.0, "text": ""}  # 运行时观测缓存，映�
 DISK_GUARD_LOCK = threading.Lock()  # 磁盘保护状态锁，锁
 DISK_GUARD_STATE = {"free_bytes": 0, "upload_only": False}  # 磁盘保护状态，映射
 DISK_GUARD_THREAD_STARTED = False  # 磁盘保护线程是否已启动，开关
+WS_ONLY_LOCK = threading.Lock()  # 仅WS模式状态锁，锁
+WS_ONLY_STATE = {"enabled": False}  # 仅WS模式状态，映射
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -202,6 +204,124 @@ def toggle_task_pause(task_id: str, exchange: str, logs: dict, status_times: dic
     return state == "pause_requested"
 
 
+def is_download_task(task_id: str) -> bool:
+    """判断是否为非WS下载任务。"""
+    return task_id not in WS_TASK_IDS
+
+
+def set_ws_only_state(enabled: bool) -> None:
+    """更新仅WS模式状态。"""
+    with WS_ONLY_LOCK:
+        WS_ONLY_STATE["enabled"] = bool(enabled)
+
+
+def is_ws_only_state_enabled() -> bool:
+    """返回仅WS模式状态。"""
+    with WS_ONLY_LOCK:
+        return bool(WS_ONLY_STATE["enabled"])
+
+
+def has_unpaused_exchange(task: "Task") -> bool:
+    """判断任务是否仍有未暂停的交易所。"""
+    for exchange in cex_config.list_exchanges():
+        if not cex_config.is_supported(task.task_id, exchange):
+            continue
+        if cex_config.is_paused(task.task_id, exchange) or cex_config.is_pause_requested(task.task_id, exchange):
+            continue
+        return True
+    return False
+
+
+def refresh_ws_only_state(tasks: list) -> bool:
+    """按当前任务暂停状态刷新仅WS模式。"""
+    enabled = True
+    for task in tasks:
+        if not is_download_task(task.task_id):
+            continue
+        if has_unpaused_exchange(task):
+            enabled = False
+            break
+    set_ws_only_state(enabled)
+    return enabled
+
+
+def apply_ws_only_mode(tasks: list, logs: dict, status_times: dict, immediate: bool, reason_text: str) -> bool:
+    """切换为仅WS运行模式。"""
+    changed = False
+    for task in tasks:
+        if not is_download_task(task.task_id):
+            continue
+        task_should_pause_immediately = immediate or not task.is_running() or task.waiting_start
+        task_changed = False
+        for exchange in cex_config.list_exchanges():
+            if not cex_config.is_supported(task.task_id, exchange):
+                continue
+            if task_should_pause_immediately:
+                if cex_config.is_paused(task.task_id, exchange):
+                    continue
+                cex_config.set_paused(task.task_id, exchange, True)
+                task_changed = True
+                changed = True
+                continue
+            if cex_config.is_paused(task.task_id, exchange) or cex_config.is_pause_requested(task.task_id, exchange):
+                continue
+            cex_config.request_pause(task.task_id, exchange)
+            task_changed = True
+            changed = True
+        if task_changed:
+            logs[task.task_id].append(reason_text)
+            status_times[task.task_id] = time.time()
+    refresh_ws_only_state(tasks)
+    return changed
+
+
+def resume_download_tasks(tasks: list, logs: dict, status_times: dict) -> bool:
+    """恢复下载任务并补启动尚未运行的线程。"""
+    changed = False
+    for task in tasks:
+        if not is_download_task(task.task_id):
+            continue
+        task_changed = False
+        for exchange in cex_config.list_exchanges():
+            if not cex_config.is_supported(task.task_id, exchange):
+                continue
+            if not cex_config.is_paused(task.task_id, exchange) and not cex_config.is_pause_requested(task.task_id, exchange):
+                continue
+            cex_config.set_paused(task.task_id, exchange, False)
+            task_changed = True
+            changed = True
+        if task_changed:
+            logs[task.task_id].append("已恢复下载模式")
+            status_times[task.task_id] = time.time()
+    for task in tasks:
+        if not is_download_task(task.task_id):
+            continue
+        if task.is_attached() or task.waiting_start or task.is_running():
+            continue
+        if not has_unpaused_exchange(task):
+            continue
+        task.start(task.thread_task_map, True, task.status_hook, task.log_hook)
+    refresh_ws_only_state(tasks)
+    return changed
+
+
+def toggle_ws_only_mode(tasks: list, logs: dict, status_times: dict) -> bool:
+    """切换全局仅WS运行模式。"""
+    if is_ws_only_state_enabled():
+        if get_disk_guard_state().get("upload_only"):
+            for task in tasks:
+                if not is_download_task(task.task_id):
+                    continue
+                logs[task.task_id].append("磁盘仅上传模式生效，暂不恢复下载任务")
+                status_times[task.task_id] = time.time()
+            refresh_ws_only_state(tasks)
+            return True
+        resume_download_tasks(tasks, logs, status_times)
+        return is_ws_only_state_enabled()
+    apply_ws_only_mode(tasks, logs, status_times, False, "已切换为仅WS模式，下载任务将暂停")
+    return is_ws_only_state_enabled()
+
+
 def install_thread_task_inheritance(thread_task_map: dict) -> None:
     original_init = threading.Thread.__init__
     original_start = threading.Thread.start
@@ -231,6 +351,7 @@ def install_thread_task_inheritance(thread_task_map: dict) -> None:
 
 class Task:
     def __init__(self, task_id: str, name: str, module, script_path: Path | None):
+        """初始化单个任务对象。"""
         self.task_id = task_id
         self.name = name
         self.module = module
@@ -238,13 +359,20 @@ class Task:
         self.thread = None
         self.start_time = None
         self.waiting_start = False
+        self.status_hook = None
+        self.log_hook = None
+        self.thread_task_map = None
 
     def start(self, thread_task_map: dict, quiet: bool, status_hook, log_hook) -> None:
+        """启动任务线程。"""
         self.waiting_start = False
         if self.task_id in ATTACHED_TASK_PARENTS:
             self.start_time = time.time()
             return
         self.start_time = time.time()
+        self.thread_task_map = thread_task_map
+        self.status_hook = status_hook
+        self.log_hook = log_hook
         if self.module:
             if hasattr(self.module, "QUIET"):
                 self.module.QUIET = quiet
@@ -551,6 +679,7 @@ def build_runtime_observe_text(max_cells: int) -> str:
     disk_snapshot = get_disk_guard_state()
     disk_free_text = format_bytes_text(int(disk_snapshot.get("free_bytes") or 0))
     disk_mode_text = "仅上传" if disk_snapshot.get("upload_only") else "正常"
+    download_mode_text = "仅WS" if is_ws_only_state_enabled() else "全部"
     ws_snapshot = cex_orderbook_ws_common.get_all_market_buffer_snapshots()
     future_snapshot = ws_snapshot["future"]
     spot_snapshot = ws_snapshot["spot"]
@@ -559,6 +688,7 @@ def build_runtime_observe_text(max_cells: int) -> str:
         f"峰值: {peak_text} | "
         f"磁盘剩余: {disk_free_text} | "
         f"磁盘模式: {disk_mode_text} | "
+        f"下载模式: {download_mode_text} | "
         f"WS缓存 future {future_snapshot['file_count']}文件/{future_snapshot['line_count']}行 | "
         f"spot {spot_snapshot['file_count']}文件/{spot_snapshot['line_count']}行"
     )
@@ -1037,6 +1167,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
     """启动全部任务并返回运行时容器。"""
     update_startup_progress(startup_progress, "加载任务定义", 0, len(TASK_DEFS), "准备构建任务列表")
     if has_s3_only_flag():
+        set_ws_only_state(False)
         if app_config.DATA_STORAGE_MODE == "s3":
             update_startup_progress(startup_progress, "初始化上传池", 0, 1, "仅上传模式，准备检查S3启动状态")
             cex_common.ensure_upload_workers_started()
@@ -1098,6 +1229,9 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         status_times[task_id] = time.time()
 
     task_hooks = {task.task_id: (make_hook(task.task_id), make_log_hook(task.task_id)) for task in tasks}
+    for task in tasks:
+        task.status_hook, task.log_hook = task_hooks[task.task_id]
+        task.thread_task_map = thread_task_map
 
     for task in tasks:
         if task.task_id == "D10001" and task.module:
@@ -1113,6 +1247,8 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         """启动一组任务。"""
         for task in task_list:
             if task.is_attached():
+                continue
+            if not has_unpaused_exchange(task):
                 continue
             status_hook, log_hook = task_hooks[task.task_id]
             task.start(thread_task_map, True, status_hook, log_hook)
@@ -1153,6 +1289,8 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         immediate_tasks = [task for task in tasks if task.task_id in WS_TASK_IDS]
         for task in deferred_tasks:
             task.waiting_start = True
+        if app_config.DATA_STORAGE_MODE == "s3":
+            apply_ws_only_mode(tasks, logs, status_times, True, "S3模式默认仅启动WS，下载任务保持暂停")
         for index, task in enumerate(immediate_tasks, start=1):
             update_startup_progress(startup_progress, "启动WS待切换", index, len(immediate_tasks), task.name)
         start_task_list(immediate_tasks)
@@ -1174,12 +1312,16 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         low_disk = is_low_disk_upload_only_required(free_bytes)
         set_disk_guard_state(free_bytes, low_disk)
         if low_disk:
+            set_ws_only_state(False)
             threshold_text = format_bytes_text(app_config.DISK_FREE_UPLOAD_ONLY_THRESHOLD_BYTES)
             free_text = format_bytes_text(free_bytes)
             reason_text = f"磁盘剩余空间不足，启动时已切换为仅上传模式: {free_text} < {threshold_text}"
             apply_upload_only_mode(tasks, logs, status_times, True, reason_text)
             update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "磁盘空间不足，仅启动上传")
             return tasks, status_counts, status_times, status_meta, logs, pending
+        apply_ws_only_mode(tasks, logs, status_times, True, "S3模式默认仅启动WS，下载任务保持暂停")
+    else:
+        set_ws_only_state(False)
     for index, task in enumerate(tasks, start=1):
         update_startup_progress(startup_progress, "启动任务", index, len(tasks), task.name)
     start_task_list(tasks)
@@ -1274,7 +1416,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             draw_rule(stdscr, rule_row, 0, max_cols - 1)
         if current_exchange == UPLOAD_VIEW_ID:
             render_upload_management(stdscr, max_cols, footer_row, header_attr, warm_attr, title_attr)
-            footer_text = "←→ 切页签  q 退出"
+            footer_text = "←→ 切页签  w 切仅WS  q 退出"
             if footer_row > 0:
                 draw_rule(stdscr, footer_row - 1, 0, max_cols - 1)
             draw_clipped_text(stdscr, footer_row, 0, footer_text, max_cols - 1, warm_attr)
@@ -1286,6 +1428,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 selected_exchange = (selected_exchange - 1) % len(exchanges)
             if key == curses.KEY_RIGHT:
                 selected_exchange = (selected_exchange + 1) % len(exchanges)
+            if key == ord("w"):
+                toggle_ws_only_mode(tasks, logs, status_times)
             time.sleep(app_config.TUI_REFRESH_SECONDS)
             continue
         now_ts = time.time()
@@ -1609,7 +1753,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                 if available <= 0:
                     break
                 draw_clipped_text(stdscr, target_row, log_col, text, available)
-        footer_text = "←→ 切交易所  ↑↓ 切选中项  Enter 启停模块  Tab 切换焦点  PgUp/PgDn 翻状态  q 退出"
+        footer_text = "←→ 切交易所  ↑↓ 切选中项  Enter 启停模块  w 切仅WS  Tab 切换焦点  PgUp/PgDn 翻状态  q 退出"
         if footer_row > 0:
             draw_rule(stdscr, footer_row - 1, 0, max_cols - 1)
         draw_clipped_text(stdscr, footer_row, 0, footer_text, max_cols - 1, warm_attr)
@@ -1617,6 +1761,8 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         key = stdscr.getch()
         if key == ord("q"):
             break
+        if key == ord("w"):
+            toggle_ws_only_mode(tasks, logs, status_times)
         if key == curses.KEY_LEFT:
             selected_exchange = (selected_exchange - 1) % len(exchanges)
         if key == curses.KEY_RIGHT:
@@ -1629,7 +1775,13 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             if key == curses.KEY_DOWN:
                 task_selected[current_exchange] += 1
             if key in {curses.KEY_ENTER, 10, 13} and exchange_tasks:
-                toggle_task_pause(exchange_tasks[task_selected[current_exchange]].task_id, current_exchange, logs, status_times)
+                selected_task = exchange_tasks[task_selected[current_exchange]]
+                paused = toggle_task_pause(selected_task.task_id, current_exchange, logs, status_times)
+                refresh_ws_only_state(tasks)
+                if paused is False and is_download_task(selected_task.task_id):
+                    if not selected_task.is_attached() and not selected_task.waiting_start and not selected_task.is_running():
+                        if has_unpaused_exchange(selected_task):
+                            selected_task.start(selected_task.thread_task_map, True, selected_task.status_hook, selected_task.log_hook)
             if exchange_tasks:
                 task_selected[current_exchange] = max(0, min(task_selected[current_exchange], len(exchange_tasks) - 1))
         else:
