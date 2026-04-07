@@ -6,6 +6,7 @@ import math
 import os
 import resource
 import runpy
+import shutil
 import signal
 import subprocess
 import sys
@@ -129,6 +130,9 @@ ATTACHED_TASK_PARENTS = {
 WS_TASK_IDS = {"D10002-4", "D10006-8"}  # WS任务标识集合，个数
 EXIT_REQUESTED = threading.Event()  # 退出请求事件，事件
 RUNTIME_OBSERVE_CACHE = {"ts": 0.0, "text": ""}  # 运行时观测缓存，映射
+DISK_GUARD_LOCK = threading.Lock()  # 磁盘保护状态锁，锁
+DISK_GUARD_STATE = {"free_bytes": 0, "upload_only": False}  # 磁盘保护状态，映射
+DISK_GUARD_THREAD_STARTED = False  # 磁盘保护线程是否已启动，开关
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -418,6 +422,89 @@ def format_bytes_text(byte_count: int) -> str:
     return f"{value:.2f} {units[unit_index]}"
 
 
+def read_data_root_free_bytes() -> int:
+    """读取数据根目录所在磁盘剩余空间。"""
+    target_path = cex_config.DATA_DYLAN_ROOT if cex_config.DATA_DYLAN_ROOT.exists() else Path.cwd()
+    return int(shutil.disk_usage(target_path).free)
+
+
+def set_disk_guard_state(free_bytes: int, upload_only: bool) -> None:
+    """更新磁盘保护状态。"""
+    with DISK_GUARD_LOCK:
+        DISK_GUARD_STATE["free_bytes"] = int(free_bytes)
+        DISK_GUARD_STATE["upload_only"] = bool(upload_only)
+
+
+def get_disk_guard_state() -> dict:
+    """返回磁盘保护状态快照。"""
+    with DISK_GUARD_LOCK:
+        return dict(DISK_GUARD_STATE)
+
+
+def is_low_disk_upload_only_required(free_bytes: int) -> bool:
+    """判断当前剩余磁盘是否需要切换为仅上传。"""
+    return app_config.DATA_STORAGE_MODE == "s3" and free_bytes < app_config.DISK_FREE_UPLOAD_ONLY_THRESHOLD_BYTES
+
+
+def apply_upload_only_mode(tasks: list, logs: dict, status_times: dict, immediate: bool, reason_text: str) -> bool:
+    """将当前任务集切换为仅上传模式。"""
+    changed = False
+    for task in tasks:
+        task_changed = False
+        for exchange in cex_config.list_exchanges():
+            if not cex_config.is_supported(task.task_id, exchange):
+                continue
+            if immediate:
+                if cex_config.is_paused(task.task_id, exchange):
+                    continue
+                cex_config.set_paused(task.task_id, exchange, True)
+                changed = True
+                task_changed = True
+            else:
+                if cex_config.is_paused(task.task_id, exchange) or cex_config.is_pause_requested(task.task_id, exchange):
+                    continue
+                cex_config.request_pause(task.task_id, exchange)
+                changed = True
+                task_changed = True
+        if task_changed:
+            logs[task.task_id].append(reason_text)
+            status_times[task.task_id] = time.time()
+    return changed
+
+
+def disk_guard_loop(tasks: list, logs: dict, status_times: dict) -> None:
+    """循环监控磁盘剩余空间并在必要时切换为仅上传。"""
+    while not EXIT_REQUESTED.is_set():
+        free_bytes = read_data_root_free_bytes()
+        low_disk = is_low_disk_upload_only_required(free_bytes)
+        set_disk_guard_state(free_bytes, low_disk)
+        if low_disk:
+            free_text = format_bytes_text(free_bytes)
+            threshold_text = format_bytes_text(app_config.DISK_FREE_UPLOAD_ONLY_THRESHOLD_BYTES)
+            reason_text = f"磁盘剩余空间不足，已切换为仅上传模式: {free_text} < {threshold_text}"
+            apply_upload_only_mode(tasks, logs, status_times, False, reason_text)
+        time.sleep(app_config.DISK_FREE_CHECK_INTERVAL_SECONDS)
+
+
+def ensure_disk_guard_started(tasks: list, logs: dict, status_times: dict) -> None:
+    """确保磁盘保护线程已启动。"""
+    global DISK_GUARD_THREAD_STARTED
+    if app_config.DATA_STORAGE_MODE != "s3":
+        set_disk_guard_state(read_data_root_free_bytes(), False)
+        return
+    with DISK_GUARD_LOCK:
+        if DISK_GUARD_THREAD_STARTED:
+            return
+        DISK_GUARD_THREAD_STARTED = True
+    thread = threading.Thread(
+        target=disk_guard_loop,
+        args=(tasks, logs, status_times),
+        name="launcher-disk-guard",
+        daemon=True,
+    )
+    thread.start()
+
+
 def read_proc_status_value_bytes(field_name: str) -> int:
     """读取当前进程状态文件中的内存字段。"""
     proc_status_path = Path("/proc/self/status")
@@ -461,12 +548,17 @@ def build_runtime_observe_text(max_cells: int) -> str:
         return truncate_by_cells(cached_text, max_cells)
     rss_text = format_bytes_text(read_process_rss_bytes())
     peak_text = format_bytes_text(read_process_peak_rss_bytes())
+    disk_snapshot = get_disk_guard_state()
+    disk_free_text = format_bytes_text(int(disk_snapshot.get("free_bytes") or 0))
+    disk_mode_text = "仅上传" if disk_snapshot.get("upload_only") else "正常"
     ws_snapshot = cex_orderbook_ws_common.get_all_market_buffer_snapshots()
     future_snapshot = ws_snapshot["future"]
     spot_snapshot = ws_snapshot["spot"]
     text = (
         f"内存: {rss_text} | "
         f"峰值: {peak_text} | "
+        f"磁盘剩余: {disk_free_text} | "
+        f"磁盘模式: {disk_mode_text} | "
         f"WS缓存 future {future_snapshot['file_count']}文件/{future_snapshot['line_count']}行 | "
         f"spot {spot_snapshot['file_count']}文件/{spot_snapshot['line_count']}行"
     )
@@ -948,6 +1040,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         if app_config.DATA_STORAGE_MODE == "s3":
             update_startup_progress(startup_progress, "初始化上传池", 0, 1, "仅上传模式，准备检查S3启动状态")
             cex_common.ensure_upload_workers_started()
+            set_disk_guard_state(read_data_root_free_bytes(), False)
         update_startup_progress(startup_progress, "启动完成", 1, 1, "仅上传模式，未启动抓取任务")
         return [], {}, {}, {}, {}, {}
     tasks = filter_tasks(build_tasks(), selected or app_config.START_TASKS)
@@ -1014,6 +1107,8 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             task.module.ATTACHED_STATUS_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[0]}
             task.module.ATTACHED_LOG_HOOKS = {"D10012": task_hooks.get("D10012", (None, None))[1]}
 
+    ensure_disk_guard_started(tasks, logs, status_times)
+
     def start_task_list(task_list: list[Task]) -> None:
         """启动一组任务。"""
         for task in task_list:
@@ -1075,6 +1170,16 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
     if app_config.DATA_STORAGE_MODE == "s3":
         update_startup_progress(startup_progress, "初始化上传池", 0, len(tasks), "准备检查S3启动状态")
         cex_common.ensure_upload_workers_started()
+        free_bytes = read_data_root_free_bytes()
+        low_disk = is_low_disk_upload_only_required(free_bytes)
+        set_disk_guard_state(free_bytes, low_disk)
+        if low_disk:
+            threshold_text = format_bytes_text(app_config.DISK_FREE_UPLOAD_ONLY_THRESHOLD_BYTES)
+            free_text = format_bytes_text(free_bytes)
+            reason_text = f"磁盘剩余空间不足，启动时已切换为仅上传模式: {free_text} < {threshold_text}"
+            apply_upload_only_mode(tasks, logs, status_times, True, reason_text)
+            update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "磁盘空间不足，仅启动上传")
+            return tasks, status_counts, status_times, status_meta, logs, pending
     for index, task in enumerate(tasks, start=1):
         update_startup_progress(startup_progress, "启动任务", index, len(tasks), task.name)
     start_task_list(tasks)
