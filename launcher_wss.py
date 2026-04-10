@@ -923,6 +923,7 @@ def build_session_state() -> dict:
         "connected": {PRIMARY_ROLE: False, BACKUP_ROLE: False},
         "recv_count": {PRIMARY_ROLE: 0, BACKUP_ROLE: 0},
         "status_text": {PRIMARY_ROLE: "准备连接", BACKUP_ROLE: "准备连接"},
+        "first_connected_logged": False,
     }
 
 
@@ -993,6 +994,7 @@ def update_shared_status(
     recv_count: int | None = None,
 ) -> None:
     """更新主备连接共享状态。"""
+    first_connected = False
     with state["lock"]:
         if connected is not None:
             state["connected"][role] = connected
@@ -1000,8 +1002,13 @@ def update_shared_status(
             state["status_text"][role] = status_text
         if recv_count is not None:
             state["recv_count"][role] = recv_count
+        if not state["first_connected_logged"] and any(state["connected"].values()):
+            state["first_connected_logged"] = True
+            first_connected = True
         online_flag, status_text_value = build_ws_status_text(state)
     status_update(exchange, market, symbol, (online_flag, status_text_value))
+    if first_connected:
+        log(f"{exchange} {market} {symbol} 主备连接成功", market)
 
 
 def switch_active_role(state: dict, exchange: str, market: str, symbol: str, failed_role: str) -> None:
@@ -1353,7 +1360,6 @@ def run_role_loop(exchange: str, market: str, symbol: str, role: str, ws_url: st
 
 def run_symbol_loop(exchange: str, market: str, symbol: str, stop_event: threading.Event) -> None:
     """持续维护单个交易对的主备WS连接。"""
-    log(f"{exchange} {market} {symbol} 主备订阅启动", market)
     state = build_session_state()
     primary_url, backup_url = build_ws_urls(exchange, market, symbol)
     primary_thread = threading.Thread(
