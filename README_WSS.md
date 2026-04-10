@@ -9,6 +9,10 @@ python3 launcher_wss.py -rm
 python3 launcher_wss.py -s3 -rm
 ```
 
+```bash
+nohup python3 launcher_wss.py -s3 > logs/launcher_wss.log 2>&1 &
+```
+
 - 不带参数：本地模式，只写本地
 - `-s3`：开启上传
 - `-rm`：启动前清空本地数据目录
@@ -30,11 +34,14 @@ export DLH_S3_PREFIX=dlh/data/dylan
 python3 launcher_wss.py -s3
 ```
 
-## 日志样式
 
-终端直接输出运行日志。
+查看日志：
 
-常见格式：
+```bash
+tail -f logs/launcher_wss.log
+```
+
+常见输出：
 
 ```text
 [D10002-4] okx future BTC-USDT-SWAP 主连接异常，准备重连: Connection to remote host was lost.
