@@ -458,7 +458,7 @@ def list_okx_delivery_symbols() -> list[str]:
     symbols = set()
     for family in cex_config.get_delivery_families("okx"):
         try:
-            payload = request_json(f"{OKX_INSTRUMENTS_URL}?{urlencode({'instType': 'FUTURES', 'instFamily': family})}")
+            payload = request_json(f"{OKX_INSTRUMENTS_URL}?{urlencode({'instType': 'FUTURES', 'uly': family})}")
         except NetworkRequestError:
             continue
         if payload.get("code") != "0":
@@ -481,7 +481,7 @@ def list_okx_delivery_symbol_start_dates() -> dict[str, str]:
     symbol_dates = {}
     for family in cex_config.get_delivery_families("okx"):
         try:
-            payload = request_json(f"{OKX_INSTRUMENTS_URL}?{urlencode({'instType': 'FUTURES', 'instFamily': family})}")
+            payload = request_json(f"{OKX_INSTRUMENTS_URL}?{urlencode({'instType': 'FUTURES', 'uly': family})}")
         except NetworkRequestError:
             continue
         if payload.get("code") != "0":

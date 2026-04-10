@@ -842,7 +842,7 @@ def list_okx_delivery_symbols() -> list[str]:
     now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
     symbols = set()
     for family in get_delivery_families("okx"):
-        payload = request_json(f"{OKX_INSTRUMENTS_URL}?{urlencode({'instType': 'FUTURES', 'instFamily': family})}")
+        payload = request_json(f"{OKX_INSTRUMENTS_URL}?{urlencode({'instType': 'FUTURES', 'uly': family})}")
         if payload.get("code") != "0":
             raise NetworkRequestError(f"接口返回错误: {payload.get('msg')}")
         for item in payload.get("data", []):
