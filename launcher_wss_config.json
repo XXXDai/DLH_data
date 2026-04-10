@@ -1,0 +1,50 @@
+{
+  "s3": {
+    "bucket_name": "main-ai-ext",
+    "prefix": "dlh/data/dylan"
+  },
+  "write": {
+    "file_segment_seconds": 3600,
+    "buffer_lines": 2048,
+    "buffer_bytes": 8388608,
+    "buffer_interval_seconds": 15
+  },
+  "exchange_enabled": {
+    "bybit": false,
+    "binance": true,
+    "bitget": true,
+    "okx": true
+  },
+  "spot_symbols": {
+    "bybit": [],
+    "binance": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "bitget": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "okx": ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+  },
+  "future_perpetual_symbols": {
+    "bybit": [],
+    "binance": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "bitget": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "okx": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"]
+  },
+  "future_delivery_families": {
+    "bybit": [],
+    "binance": [],
+    "bitget": [],
+    "okx": ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+  },
+  "dataset_support": {
+    "D10002-4": {
+      "bybit": false,
+      "binance": true,
+      "bitget": true,
+      "okx": true
+    },
+    "D10006-8": {
+      "bybit": false,
+      "binance": true,
+      "bitget": true,
+      "okx": true
+    }
+  }
+}
