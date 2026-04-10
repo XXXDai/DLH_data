@@ -1,3 +1,11 @@
+import os
+
+
+def normalize_s3_prefix(text: str) -> str:
+    """规范化S3目录前缀文本。"""
+    return text.strip().strip("/")
+
+
 SCHEDULE_REFRESH_SECONDS = 10  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = 15  # WS状态超时，秒
 
@@ -12,8 +20,8 @@ DOWNLOAD_CONCURRENCY = 4  # 下载并发数，个数
 LOOP_INTERVAL_SECONDS = 4 * 60 * 60  # 循环间隔，秒
 DELIVERY_REFRESH_SECONDS = 15 * 60  # 交割合约刷新间隔，秒
 DATA_STORAGE_MODE = "local"  # 数据存储模式，可选local或s3，字符串
-S3_BUCKET_NAME = "main-ai-ext"  # S3桶名称，字符串
-S3_PREFIX = "dlh/data/dylan"  # S3目录前缀，路径
+S3_BUCKET_NAME = os.getenv("DLH_S3_BUCKET_NAME", "main-ai-ext").strip()  # S3桶名称，字符串
+S3_PREFIX = normalize_s3_prefix(os.getenv("DLH_S3_PREFIX", "dlh/data/dylan"))  # S3目录前缀，路径
 S3_CONNECT_TIMEOUT_SECONDS = 10  # S3连接超时，秒
 S3_READ_TIMEOUT_SECONDS = 60  # S3读取超时，秒
 S3_MAX_ATTEMPTS = 3  # S3最大重试次数，次

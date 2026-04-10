@@ -47,6 +47,11 @@ def has_s3_only_flag() -> bool:
     return "-s3" in sys.argv and "-only" in sys.argv
 
 
+def has_no_wss_flag() -> bool:
+    """判断是否禁用WSS启动。"""
+    return "-nowss" in sys.argv
+
+
 def resolve_process_cwd(pid: int) -> str:
     """解析目标进程的工作目录。"""
     proc_cwd_path = Path(f"/proc/{pid}/cwd")
@@ -979,6 +984,13 @@ def filter_tasks(tasks: list, selected: list) -> list:
     return [task for task in tasks if task.task_id in selected_set]
 
 
+def apply_runtime_task_flags(tasks: list[Task]) -> list[Task]:
+    """按启动参数过滤运行时任务列表。"""
+    if not has_no_wss_flag():
+        return tasks
+    return [task for task in tasks if task.task_id not in WS_TASK_IDS]
+
+
 class ThreadLogWriter:
     def __init__(self, thread_task_map: dict, logs: dict, pending: dict, status_times: dict, error_logger):
         """初始化线程日志写入器。"""
@@ -1174,7 +1186,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             set_disk_guard_state(read_data_root_free_bytes(), False)
         update_startup_progress(startup_progress, "启动完成", 1, 1, "仅上传模式，未启动抓取任务")
         return [], {}, {}, {}, {}, {}
-    tasks = filter_tasks(build_tasks(), selected or app_config.START_TASKS)
+    tasks = apply_runtime_task_flags(filter_tasks(build_tasks(), selected or app_config.START_TASKS))
     if not tasks:
         print("未配置启动任务")
         return [], {}, {}, {}, {}, {}
@@ -1273,7 +1285,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         start_task_list(task_list)
 
     other_launchers = list_other_launcher_processes()
-    if other_launchers:
+    if other_launchers and not has_no_wss_flag():
         update_startup_progress(startup_progress, "检测旧版本", 0, len(tasks), "发现旧版本进程，先启动WS待切换模式")
         future_ws_selected = any(task.task_id == "D10002-4" for task in tasks)
         spot_ws_selected = any(task.task_id == "D10006-8" for task in tasks)
@@ -1319,7 +1331,8 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             apply_upload_only_mode(tasks, logs, status_times, True, reason_text)
             update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "磁盘空间不足，仅启动上传")
             return tasks, status_counts, status_times, status_meta, logs, pending
-        apply_ws_only_mode(tasks, logs, status_times, True, "S3模式默认仅启动WS，下载任务保持暂停")
+        if not has_no_wss_flag():
+            apply_ws_only_mode(tasks, logs, status_times, True, "S3模式默认仅启动WS，下载任务保持暂停")
     else:
         set_ws_only_state(False)
     for index, task in enumerate(tasks, start=1):
