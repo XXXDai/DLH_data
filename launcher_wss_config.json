@@ -1,4 +1,33 @@
 {
+  "__comment_current_symbols": [
+    "当前收集的交易对：",
+    "现货 binance：BTCUSDT、ETHUSDT、SOLUSDT",
+    "现货 bitget：BTCUSDT、ETHUSDT、SOLUSDT",
+    "现货 okx：BTC-USDT、ETH-USDT、SOL-USDT",
+    "期货 binance：BTCUSDT、ETHUSDT、SOLUSDT",
+    "期货 bitget：BTCUSDT、ETHUSDT、SOLUSDT",
+    "期货 okx 永续：BTC-USDT-SWAP、ETH-USDT-SWAP、SOL-USDT-SWAP",
+    "期货 okx 交割：按 BTC-USDT、ETH-USDT、SOL-USDT 动态刷新当前可交易合约"
+  ],
+  "__comment_modify_guide": [
+    "增加或修改交易所启用状态：改 exchange_enabled",
+    "增加或修改现货代币对：改 spot_symbols",
+    "增加或修改期货永续代币对：改 future_perpetual_symbols",
+    "增加或修改 okx 交割合约家族：改 future_delivery_families",
+    "修改哪些交易所支持哪些数据集：改 dataset_support",
+    "修改实际上传到 S3 的间隔：改 write.file_segment_seconds",
+    "当前默认是 3600 秒，也就是按小时切文件并在切文件时上传",
+    "如果改成 60，就会按分钟切文件并上传，但目录仍然按小时聚合，不会再增加更细的目录层级"
+  ],
+  "__comment_write_logic": [
+    "数据先写入内存缓冲，不是每条消息都立刻刷到磁盘",
+    "当前刷盘阈值在 write 下面",
+    "buffer_lines：缓冲行数达到阈值后刷盘",
+    "buffer_bytes：缓冲字节数达到阈值后刷盘",
+    "buffer_interval_seconds：距离上次刷盘超过这个秒数后刷盘",
+    "文件按 write.file_segment_seconds 切分，切到新文件时会先关闭旧文件，关闭时会先刷盘，再进入上传队列",
+    "目录始终按小时聚合；如果切分粒度改成分钟或秒，只会让文件名变细，不会继续新增目录层级"
+  ],
   "s3": {
     "bucket_name": "main-ai-ext",
     "prefix": "dlh/data/dylan"

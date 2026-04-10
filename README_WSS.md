@@ -25,19 +25,73 @@ nohup python3 launcher_wss.py -s3 > logs/launcher_wss.log 2>&1 &
 launcher_wss_config.json
 ```
 
-当前这些配置都从这个文件读取：
+配置结构和含义一一对应如下：
 
-- `s3.bucket_name`
-- `s3.prefix`
-- `write.file_segment_seconds`
-- `write.buffer_lines`
-- `write.buffer_bytes`
-- `write.buffer_interval_seconds`
-- `exchange_enabled`
-- `spot_symbols`
-- `future_perpetual_symbols`
-- `future_delivery_families`
-- `dataset_support`
+```json
+{
+  "s3": {
+    "bucket_name": "main-ai-ext",
+    "prefix": "dlh/data/dylan"
+  },
+  "write": {
+    "file_segment_seconds": 3600,
+    "buffer_lines": 2048,
+    "buffer_bytes": 8388608,
+    "buffer_interval_seconds": 15
+  },
+  "exchange_enabled": {
+    "bybit": false,
+    "binance": true,
+    "bitget": true,
+    "okx": true
+  },
+  "spot_symbols": {
+    "bybit": [],
+    "binance": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "bitget": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "okx": ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+  },
+  "future_perpetual_symbols": {
+    "bybit": [],
+    "binance": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "bitget": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+    "okx": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP"]
+  },
+  "future_delivery_families": {
+    "bybit": [],
+    "binance": [],
+    "bitget": [],
+    "okx": ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
+  },
+  "dataset_support": {
+    "D10002-4": {
+      "bybit": false,
+      "binance": true,
+      "bitget": true,
+      "okx": true
+    },
+    "D10006-8": {
+      "bybit": false,
+      "binance": true,
+      "bitget": true,
+      "okx": true
+    }
+  }
+}
+```
+
+- `s3.bucket_name`：S3 bucket 名称
+- `s3.prefix`：S3 根目录前缀
+- `write.file_segment_seconds`：切文件并触发上传的时间间隔，单位秒
+- `write.buffer_lines`：单文件缓冲达到多少行后刷盘
+- `write.buffer_bytes`：单文件缓冲达到多少字节后刷盘
+- `write.buffer_interval_seconds`：单文件最长多久强制刷盘一次，单位秒
+- `exchange_enabled.<交易所>`：是否启用该交易所
+- `spot_symbols.<交易所>`：该交易所现货要收集的交易对
+- `future_perpetual_symbols.<交易所>`：该交易所永续要收集的交易对
+- `future_delivery_families.okx`：OKX 交割合约家族，程序会动态刷新当前可交易合约
+- `dataset_support.D10002-4.<交易所>`：该交易所是否启用期货实时订单簿
+- `dataset_support.D10006-8.<交易所>`：该交易所是否启用现货实时订单簿
 
 ## 当前收集的数据集
 
@@ -56,36 +110,7 @@ launcher_wss_config.json
 - `orderbook_rt_ss`
 - `orderbook_rt_ss_1s`
 
-当前收集的交易对：
-
-- 现货 `binance`：`BTCUSDT`、`ETHUSDT`、`SOLUSDT`
-- 现货 `bitget`：`BTCUSDT`、`ETHUSDT`、`SOLUSDT`
-- 现货 `okx`：`BTC-USDT`、`ETH-USDT`、`SOL-USDT`
-- 期货 `binance`：`BTCUSDT`、`ETHUSDT`、`SOLUSDT`
-- 期货 `bitget`：`BTCUSDT`、`ETHUSDT`、`SOLUSDT`
-- 期货 `okx` 永续：`BTC-USDT-SWAP`、`ETH-USDT-SWAP`、`SOL-USDT-SWAP`
-- 期货 `okx` 交割：按 `BTC-USDT`、`ETH-USDT`、`SOL-USDT` 动态刷新当前可交易合约
-
-## 修改位置
-
-- 增加或修改交易所启用状态：`launcher_wss_config.json` 里的 `exchange_enabled`
-- 增加或修改现货代币对：`launcher_wss_config.json` 里的 `spot_symbols`
-- 增加或修改期货永续代币对：`launcher_wss_config.json` 里的 `future_perpetual_symbols`
-- 增加或修改 `okx` 交割合约家族：`launcher_wss_config.json` 里的 `future_delivery_families`
-- 修改哪些交易所支持哪些数据集：`launcher_wss_config.json` 里的 `dataset_support`
-- 修改实际上传到 `S3` 的间隔：`launcher_wss_config.json` 里的 `write.file_segment_seconds`
-- 当前默认是 `3600` 秒，也就是按小时切文件并在切文件时上传
-- 如果改成 `60`，就会按分钟切文件并上传，但目录仍然按小时聚合，不会再增加更细的目录层级
-
-## 落盘逻辑
-
-- 数据先写入内存缓冲，不是每条消息都立刻刷到磁盘
-- 当前刷盘阈值在 `launcher_wss_config.json` 的 `write` 下面
-- `buffer_lines`：缓冲行数达到阈值后刷盘
-- `buffer_bytes`：缓冲字节数达到阈值后刷盘
-- `buffer_interval_seconds`：距离上次刷盘超过这个秒数后刷盘
-- 文件按 `write.file_segment_seconds` 切分，切到新文件时会先关闭旧文件，关闭时会先刷盘，再进入上传队列
-- 目录始终按小时聚合；如果切分粒度改成分钟或秒，只会让文件名变细，不会继续新增目录层级
+更细的交易对说明、修改位置、落盘逻辑说明，直接看 `launcher_wss_config.json` 里的 `__comment_*` 字段。
 
 
 查看日志：
