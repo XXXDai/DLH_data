@@ -93,6 +93,10 @@ launcher_wss_config.json
 - `dataset_support.D10002-4.<交易所>`：该交易所是否启用期货实时订单簿
 - `dataset_support.D10006-8.<交易所>`：该交易所是否启用现货实时订单簿
 
+- 修改 `launcher_wss_config.json` 后不需要重启，程序会自动检测，并在下一个整点切到新
+
+配置
+
 ## 当前收集的数据集
 
 - `D10002-4`：期货实时订单簿
@@ -109,8 +113,6 @@ launcher_wss_config.json
 - `orderbook_rt`
 - `orderbook_rt_ss`
 - `orderbook_rt_ss_1s`
-
-更细的交易对说明、修改位置、落盘逻辑说明，直接看 `launcher_wss_config.json` 里的 `__comment_*` 字段。
 
 
 查看日志：
