@@ -62,6 +62,7 @@ ORDERBOOK_DEPTH_FUTURE = 200  # 期货订单簿深度，档位
 ORDERBOOK_DEPTH_SPOT = 50  # 现货订单簿深度，档位
 KEEP_ORDERBOOK_LEVELS = 2000  # 内存保留盘口层数，档位
 SUMMARY_INTERVAL_SECONDS = 60  # 状态摘要输出间隔，秒
+STARTUP_WARMUP_SECONDS = 8  # 首屏状态预热等待时长，秒
 LOG_LINES_PER_TASK = 50  # 每任务控制台日志缓存行数，行
 MAX_LOG_LINE_CHARS = 2000  # 单行日志最大长度，字符
 
@@ -1437,7 +1438,7 @@ def build_ws_section_lines(task_id: str, exchange: str) -> list[str]:
     prefix = f"{exchange}/"
     exchange_bucket = {key: value for key, value in bucket.items() if isinstance(key, str) and key.startswith(prefix)}
     if not exchange_bucket:
-        return [f"{exchange.upper()}: 暂无状态"]
+        return [f"{exchange.upper()}: 启动中"]
     lines = []
     for key in sorted(exchange_bucket):
         value = exchange_bucket[key]
@@ -1473,6 +1474,29 @@ def build_runtime_observe_text() -> str:
     return text
 
 
+def has_exchange_status(task_id: str, exchange: str) -> bool:
+    """判断指定交易所是否已写入至少一条状态。"""
+    prefix = f"{exchange}/"
+    bucket = STATUS_COUNTS.get(task_id, {})
+    return any(isinstance(key, str) and key.startswith(prefix) for key in bucket)
+
+
+def wait_for_initial_status() -> None:
+    """等待首屏状态预热完成。"""
+    expected = []
+    for task in build_tasks():
+        for exchange in list_exchanges():
+            if is_supported(task.task_id, exchange):
+                expected.append((task.task_id, exchange))
+    deadline = time.time() + STARTUP_WARMUP_SECONDS
+    while not EXIT_REQUESTED.is_set():
+        if all(has_exchange_status(task_id, exchange) for task_id, exchange in expected):
+            return
+        if time.time() >= deadline:
+            return
+        time.sleep(0.2)
+
+
 def build_summary_lines() -> list[str]:
     """构造控制台状态摘要。"""
     upload_snapshot = get_upload_pool_snapshot()
@@ -1505,6 +1529,7 @@ def build_summary_lines() -> list[str]:
 
 def run_summary_loop(tasks: list[Task]) -> None:
     """循环输出状态摘要。"""
+    wait_for_initial_status()
     write_console_line("DLH WSS 已启动，按 Ctrl+C 退出。")
     next_summary_ts = 0.0
     while not EXIT_REQUESTED.is_set():
