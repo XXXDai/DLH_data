@@ -662,7 +662,7 @@ def read_process_rss_bytes() -> int:
     rss_bytes = read_proc_status_value_bytes("VmRSS")
     if rss_bytes > 0:
         return rss_bytes
-    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    return read_ru_maxrss_bytes()
 
 
 def read_process_peak_rss_bytes() -> int:
@@ -670,7 +670,15 @@ def read_process_peak_rss_bytes() -> int:
     peak_bytes = read_proc_status_value_bytes("VmHWM")
     if peak_bytes > 0:
         return peak_bytes
-    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    return read_ru_maxrss_bytes()
+
+
+def read_ru_maxrss_bytes() -> int:
+    """按当前平台解释ru_maxrss的单位。"""
+    rss_value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "darwin":
+        return rss_value
+    return rss_value * 1024
 
 
 def build_runtime_observe_text(max_cells: int) -> str:
