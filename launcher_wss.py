@@ -62,7 +62,7 @@ ORDERBOOK_DEPTH_FUTURE = 200  # 期货订单簿深度，档位
 ORDERBOOK_DEPTH_SPOT = 50  # 现货订单簿深度，档位
 KEEP_ORDERBOOK_LEVELS = 2000  # 内存保留盘口层数，档位
 SUMMARY_INTERVAL_SECONDS = 60  # 状态摘要输出间隔，秒
-STARTUP_WARMUP_SECONDS = 8  # 首屏状态预热等待时长，秒
+STARTUP_WARMUP_SECONDS = 30  # 首屏在线状态预热等待时长，秒
 LOG_LINES_PER_TASK = 50  # 每任务控制台日志缓存行数，行
 MAX_LOG_LINE_CHARS = 2000  # 单行日志最大长度，字符
 
@@ -1480,23 +1480,42 @@ def build_runtime_observe_text() -> str:
     return text
 
 
-def has_exchange_status(task_id: str, exchange: str) -> bool:
-    """判断指定交易所是否已写入至少一条状态。"""
-    prefix = f"{exchange}/"
-    bucket = STATUS_COUNTS.get(task_id, {})
-    return any(isinstance(key, str) and key.startswith(prefix) for key in bucket)
+def list_initial_symbols(exchange: str, market: str) -> list[str]:
+    """返回首屏预热阶段需要等待的交易对列表。"""
+    try:
+        return resolve_symbols(exchange, market)
+    except NetworkRequestError:
+        if market == "future":
+            return get_future_symbols(exchange)
+        return get_spot_symbols(exchange)
+
+
+def build_initial_status_keys() -> list[tuple[str, str]]:
+    """构造首屏预热需要等待的状态键列表。"""
+    expected = []
+    for task in build_tasks():
+        for exchange in list_exchanges():
+            if not is_supported(task.task_id, exchange):
+                continue
+            for symbol in list_initial_symbols(exchange, task.market):
+                expected.append((task.task_id, get_status_key(exchange, task.market, symbol)))
+    return expected
+
+
+def has_online_status(task_id: str, status_key: str) -> bool:
+    """判断指定状态键是否已进入在线状态。"""
+    value = STATUS_COUNTS.get(task_id, {}).get(status_key)
+    return isinstance(value, tuple) and len(value) >= 1 and int(value[0]) > 0
 
 
 def wait_for_initial_status() -> None:
     """等待首屏状态预热完成。"""
-    expected = []
-    for task in build_tasks():
-        for exchange in list_exchanges():
-            if is_supported(task.task_id, exchange):
-                expected.append((task.task_id, exchange))
+    expected = build_initial_status_keys()
+    if not expected:
+        return
     deadline = time.time() + STARTUP_WARMUP_SECONDS
     while not EXIT_REQUESTED.is_set():
-        if all(has_exchange_status(task_id, exchange) for task_id, exchange in expected):
+        if all(has_online_status(task_id, status_key) for task_id, status_key in expected):
             return
         if time.time() >= deadline:
             return
