@@ -588,6 +588,8 @@ def build_ws_status_text(state: dict) -> tuple[int, str]:
         role_summary = "主活 备断" if active_role == PRIMARY_ROLE else "已切主"
     elif backup_connected:
         role_summary = "已切备" if active_role == BACKUP_ROLE else "备活 主断"
+    elif primary_short == "连接中" and backup_short == "连接中":
+        role_summary = "首连中"
     else:
         role_summary = "双断重连中"
     online_flag = 1 if state["connected"][active_role] else 0
