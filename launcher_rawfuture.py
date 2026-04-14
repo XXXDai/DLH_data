@@ -1,6 +1,8 @@
+from pathlib import Path
 import sys
 
 import launcher
+from cex import cex_config
 
 
 DEFAULT_RAW_FUTURE_SCOPE = "-rawfuture=okx,binance:ETH:2026-02-01:2026-03-31"  # 默认原始期货专项范围，字符串
@@ -21,12 +23,36 @@ def list_no_wait_launcher_processes() -> list[str]:
     return []
 
 
+def build_raw_future_symbol(exchange: str, base_coin: str) -> str:
+    """构造原始期货专项交易对目录名。"""
+    if exchange == "okx":
+        return f"{base_coin}-USDT-SWAP"
+    return f"{base_coin}USDT"
+
+
+def build_raw_future_upload_scan_roots() -> list[Path]:
+    """构造原始期货专项上传扫描目录列表。"""
+    scope = launcher.parse_future_raw_priority_scope()
+    if not scope:
+        return []
+    roots = []
+    for exchange in scope["exchanges"]:
+        symbol = build_raw_future_symbol(exchange, scope["base_coin"])
+        for dataset_id in cex_config.get_future_raw_priority_task_ids():
+            base_dir = cex_config.get_source_dir(dataset_id, exchange)
+            if not base_dir:
+                continue
+            roots.append(base_dir / symbol)
+    return roots
+
+
 def main() -> None:
     """运行原始期货专项独立启动器。"""
     prepare_runtime_args()
     launcher.apply_storage_mode_from_argv()
-    launcher.cex_common.set_upload_startup_sync_enabled(False)
-    launcher.cex_common.set_storage_s3_read_enabled(False)
+    launcher.cex_common.set_upload_startup_sync_enabled(True)
+    launcher.cex_common.set_upload_startup_scan_roots(build_raw_future_upload_scan_roots())
+    launcher.cex_common.set_storage_s3_read_enabled(True)
     launcher.list_other_launcher_processes = list_no_wait_launcher_processes
     launcher.main()
 

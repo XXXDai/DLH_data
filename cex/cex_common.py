@@ -38,6 +38,7 @@ UPLOAD_WORKERS_STARTED = False  # S3上传线程是否已启动，开关
 UPLOAD_WORKER_THREADS = []  # S3上传工作线程列表，个数
 UPLOAD_STARTUP_SYNC_DONE = False  # S3启动补传是否已完成，开关
 UPLOAD_STARTUP_SYNC_ENABLED = True  # S3启动补传扫描开关，开关
+UPLOAD_STARTUP_SCAN_ROOTS = None  # S3启动补传扫描根目录列表，列表
 STORAGE_S3_READ_ENABLED = True  # S3存储读取检查开关，开关
 UPLOAD_STATUS_LOCK = threading.Lock()  # S3上传状态锁，锁对象
 UPLOAD_ACTIVE_TASKS = {}  # S3活跃上传任务映射，个数
@@ -401,6 +402,15 @@ def set_upload_startup_sync_enabled(enabled: bool) -> None:
         update_upload_startup_status("已跳过启动扫描", 0, 0, "-", 0, 0, True)
 
 
+def set_upload_startup_scan_roots(dir_paths) -> None:
+    """设置S3启动补传扫描根目录。"""
+    global UPLOAD_STARTUP_SCAN_ROOTS
+    if dir_paths is None:
+        UPLOAD_STARTUP_SCAN_ROOTS = None
+        return
+    UPLOAD_STARTUP_SCAN_ROOTS = [Path(path).resolve() for path in dir_paths]
+
+
 def set_storage_s3_read_enabled(enabled: bool) -> None:
     """设置S3存储读取检查开关。"""
     global STORAGE_S3_READ_ENABLED
@@ -561,6 +571,26 @@ def list_all_s3_keys_under_data_root() -> set[str]:
         raise RuntimeError(f"S3检查失败: {exc.response.get('Error', {}).get('Code', '未知错误')}") from exc
 
 
+def list_upload_startup_local_files() -> list[Path]:
+    """列出启动补传需要扫描的本地文件。"""
+    if UPLOAD_STARTUP_SCAN_ROOTS is None:
+        if not cex_config.DATA_DYLAN_ROOT.exists():
+            return []
+        return sorted([path.resolve() for path in cex_config.DATA_DYLAN_ROOT.rglob("*") if path.is_file()])
+    file_map = {}
+    for root_path in UPLOAD_STARTUP_SCAN_ROOTS:
+        if not root_path.exists():
+            continue
+        if root_path.is_file():
+            file_map[str(root_path)] = root_path
+            continue
+        for file_path in root_path.rglob("*"):
+            if file_path.is_file():
+                resolved_path = file_path.resolve()
+                file_map[str(resolved_path)] = resolved_path
+    return [file_map[key] for key in sorted(file_map)]
+
+
 def sync_local_files_to_s3_on_startup() -> None:
     """启动时按S3现状补传并清理本地文件。"""
     global UPLOAD_STARTUP_SYNC_DONE
@@ -575,7 +605,7 @@ def sync_local_files_to_s3_on_startup() -> None:
         UPLOAD_STARTUP_SYNC_DONE = True
         update_upload_startup_status("目录不存在", 0, 0, "-", 0, 0, True)
         return
-    local_files = sorted([path for path in cex_config.DATA_DYLAN_ROOT.rglob("*") if path.is_file()])
+    local_files = list_upload_startup_local_files()
     queued_count = 0
     deleted_count = 0
     update_upload_startup_status("扫描本地文件", 0, len(local_files), "-", queued_count, deleted_count, False)
