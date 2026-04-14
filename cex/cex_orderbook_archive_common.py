@@ -599,7 +599,7 @@ def download_archive(exchange: str, url: str, output_path: Path, progress_hook=N
     return False, last_error
 
 
-def download_date(exchange: str, market: str, symbol: str, date_str: str, done_count: int = 0) -> bool:
+def download_date(exchange: str, market: str, symbol: str, date_str: str, done_count: int = 0, stage_text: str = "") -> bool:
     """下载单个日期的订单簿归档。"""
     base_dir = data_dir_for_market(market, exchange)
     if not base_dir:
@@ -610,7 +610,7 @@ def download_date(exchange: str, market: str, symbol: str, date_str: str, done_c
         clear_failure(exchange, market, symbol, date_str)
         return True
     url = build_url(exchange, market, symbol, date_str)
-    progress_hook = make_download_progress_hook(exchange, market, symbol, done_count, f"日 {date_str} 请求中")
+    progress_hook = make_download_progress_hook(exchange, market, symbol, done_count, stage_text or f"日 {date_str} 请求中")
     if exchange == "okx":
         ok, message = download_okx_normalized(url, output_path, symbol, progress_hook)
     else:
@@ -678,7 +678,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"重试 {date_str} {file_name}"))
         log_market(market, f"{exchange} {market} {symbol} 重试日包: {date_str}")
-        if download_date(exchange, market, symbol, date_str, done_count):
+        if download_date(exchange, market, symbol, date_str, done_count, f"重试 {date_str} 请求中"):
             process_followup_snapshot(exchange, market, symbol, date_str)
             done_count += 1
             existing_dates.add(date_str)
@@ -708,7 +708,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} 请求中"))
         log_market(market, f"{exchange} {market} {symbol} 请求日包: {date_str}")
-        if download_date(exchange, market, symbol, date_str, done_count):
+        if download_date(exchange, market, symbol, date_str, done_count, f"{index}/{total} {date_str} 请求中"):
             process_followup_snapshot(exchange, market, symbol, date_str)
             done_count += 1
             existing_dates.add(date_str)

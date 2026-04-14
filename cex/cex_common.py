@@ -829,7 +829,7 @@ def save_failures(path: Path, failures: list) -> None:
     ensure_parent(path)
     tmp_path = path.with_name(path.name + ".tmp")
     tmp_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8")
-    replace_output_file(tmp_path, path)
+    tmp_path.replace(path)
 
 
 def upsert_failure(failures: list, record: dict) -> None:

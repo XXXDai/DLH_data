@@ -1766,7 +1766,10 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                     status_header = ("对象", "已同步天数", "阶段", "当前", "说明")
                 header_rows = 1 if status_header else 0
                 max_status_rows = max(0, min(total, max(4, detail_height // 2)))
-                status_height = min(total, max(0, max_status_rows - header_rows))
+                visible_body_rows = max(0, max_status_rows - header_rows)
+                if total > 0:
+                    visible_body_rows = max(1, visible_body_rows)
+                status_height = min(total, visible_body_rows)
                 status_height_cached = status_height
                 status_selected_index = max(0, min(status_selected_index, total - 1))
                 if status_selected_index < status_scroll:
