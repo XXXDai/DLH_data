@@ -314,7 +314,16 @@ def convert_okx_tar_to_zip(raw_path: Path, output_path: Path, symbol: str) -> in
     return written_count
 
 
-def download_okx_normalized(url: str, output_path: Path, symbol: str) -> tuple[bool, str]:
+def make_download_progress_hook(exchange: str, market: str, symbol: str, done_count: int, stage_text: str):
+    """构造订单簿下载进度回调。"""
+    def hook(progress: dict) -> None:
+        """更新订单簿下载进度。"""
+        status_update(exchange, market, symbol, (done_count, stage_text, progress))
+
+    return hook
+
+
+def download_okx_normalized(url: str, output_path: Path, symbol: str, progress_hook=None) -> tuple[bool, str]:
     """下载并归一化OKX订单簿归档。"""
     raw_tmp_path = output_path.with_name(output_path.name + ".tar.gz.part")
     zip_tmp_path = build_part_path(output_path)
@@ -324,14 +333,29 @@ def download_okx_normalized(url: str, output_path: Path, symbol: str) -> tuple[b
     for attempt in range(1, RETRY_TIMES + 1):
         try:
             with open_download_request("okx", url) as response:
+                started_at = time.time()
+                total_size = int(response.headers.get("Content-Length") or 0)
                 if raw_tmp_path.exists():
                     raw_tmp_path.unlink()
                 with raw_tmp_path.open("wb") as file_obj:
+                    downloaded_bytes = 0
                     while True:
                         chunk = response.read(CHUNK_SIZE)
                         if not chunk:
                             break
                         file_obj.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        if progress_hook:
+                            now_ts = time.time()
+                            elapsed_seconds = max(0.001, now_ts - started_at)
+                            progress_hook(
+                                {
+                                    "downloaded_bytes": downloaded_bytes,
+                                    "total_bytes": total_size,
+                                    "speed_bytes_per_second": downloaded_bytes / elapsed_seconds,
+                                    "updated_at": now_ts,
+                                }
+                            )
         except HTTPError as exc:
             if raw_tmp_path.exists():
                 raw_tmp_path.unlink()
@@ -509,7 +533,7 @@ def open_download_request(exchange: str, url: str):
     return urlopen(request, timeout=TIMEOUT_SECONDS)
 
 
-def download_archive(exchange: str, url: str, output_path: Path) -> tuple[bool, str]:
+def download_archive(exchange: str, url: str, output_path: Path, progress_hook=None) -> tuple[bool, str]:
     """下载单个归档文件。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = build_part_path(output_path)
@@ -517,14 +541,29 @@ def download_archive(exchange: str, url: str, output_path: Path) -> tuple[bool, 
     for attempt in range(1, RETRY_TIMES + 1):
         try:
             with open_download_request(exchange, url) as response:
+                started_at = time.time()
+                total_size = int(response.headers.get("Content-Length") or 0)
                 if tmp_path.exists():
                     tmp_path.unlink()
                 with tmp_path.open("wb") as file_obj:
+                    downloaded_bytes = 0
                     while True:
                         chunk = response.read(CHUNK_SIZE)
                         if not chunk:
                             break
                         file_obj.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        if progress_hook:
+                            now_ts = time.time()
+                            elapsed_seconds = max(0.001, now_ts - started_at)
+                            progress_hook(
+                                {
+                                    "downloaded_bytes": downloaded_bytes,
+                                    "total_bytes": total_size,
+                                    "speed_bytes_per_second": downloaded_bytes / elapsed_seconds,
+                                    "updated_at": now_ts,
+                                }
+                            )
         except HTTPError as exc:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -560,7 +599,7 @@ def download_archive(exchange: str, url: str, output_path: Path) -> tuple[bool, 
     return False, last_error
 
 
-def download_date(exchange: str, market: str, symbol: str, date_str: str) -> bool:
+def download_date(exchange: str, market: str, symbol: str, date_str: str, done_count: int = 0) -> bool:
     """下载单个日期的订单簿归档。"""
     base_dir = data_dir_for_market(market, exchange)
     if not base_dir:
@@ -571,10 +610,11 @@ def download_date(exchange: str, market: str, symbol: str, date_str: str) -> boo
         clear_failure(exchange, market, symbol, date_str)
         return True
     url = build_url(exchange, market, symbol, date_str)
+    progress_hook = make_download_progress_hook(exchange, market, symbol, done_count, f"日 {date_str} 请求中")
     if exchange == "okx":
-        ok, message = download_okx_normalized(url, output_path, symbol)
+        ok, message = download_okx_normalized(url, output_path, symbol, progress_hook)
     else:
-        ok, message = download_archive(exchange, url, output_path)
+        ok, message = download_archive(exchange, url, output_path, progress_hook)
     if ok:
         clear_failure(exchange, market, symbol, date_str)
         return True
@@ -638,7 +678,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"重试 {date_str} {file_name}"))
         log_market(market, f"{exchange} {market} {symbol} 重试日包: {date_str}")
-        if download_date(exchange, market, symbol, date_str):
+        if download_date(exchange, market, symbol, date_str, done_count):
             process_followup_snapshot(exchange, market, symbol, date_str)
             done_count += 1
             existing_dates.add(date_str)
@@ -668,7 +708,7 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         file_name = build_output_path(exchange, market, base_dir, symbol, date_str).name
         status_update(exchange, market, symbol, (done_count, f"{index}/{total} {date_str} 请求中"))
         log_market(market, f"{exchange} {market} {symbol} 请求日包: {date_str}")
-        if download_date(exchange, market, symbol, date_str):
+        if download_date(exchange, market, symbol, date_str, done_count):
             process_followup_snapshot(exchange, market, symbol, date_str)
             done_count += 1
             existing_dates.add(date_str)

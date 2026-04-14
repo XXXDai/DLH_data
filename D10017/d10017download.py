@@ -49,6 +49,15 @@ def status_update(exchange: str, market: str, symbol: str, value) -> None:
         STATUS_HOOK(cex_config.get_status_key(exchange, market, symbol), value)
 
 
+def make_download_progress_hook(exchange: str, market: str, symbol: str, synced_count: int, stage_text: str):
+    """构造下载进度回调。"""
+    def hook(progress: dict) -> None:
+        """更新下载进度。"""
+        status_update(exchange, market, symbol, (synced_count, stage_text, progress))
+
+    return hook
+
+
 def build_file_path(base_dir: Path, symbol: str) -> Path:
     """构造资金费率文件路径。"""
     return base_dir / symbol / f"{symbol}_fundingrate.csv"
@@ -132,7 +141,7 @@ def fetch_bybit_rows(symbol: str, start_ms: int, end_ms: int) -> list:
     return rows
 
 
-def fetch_binance_bucket_rows(symbol: str, start_date: str) -> list:
+def fetch_binance_bucket_rows(symbol: str, start_date: str, synced_count: int = 0) -> list:
     """抓取Binance月度资金费率文件。"""
     rows = []
     start_month = datetime.strptime(start_date, "%Y-%m-%d").strftime("%Y-%m")
@@ -148,7 +157,8 @@ def fetch_binance_bucket_rows(symbol: str, start_date: str) -> list:
             f"{symbol}-fundingRate-{month_tag}.zip"
         )
         try:
-            content = download_bytes(url, TIMEOUT_SECONDS)
+            progress_hook = make_download_progress_hook("binance", "future", symbol, synced_count, f"月 {month_tag} 请求中")
+            content = download_bytes(url, TIMEOUT_SECONDS, progress_hook)
         except RuntimeError as exc:
             if "HTTP 404" not in str(exc):
                 raise
@@ -288,7 +298,7 @@ def build_rows(exchange: str, symbol: str, start_date: str, existing_ts: set) ->
     if exchange == "bybit":
         raw_rows = fetch_bybit_rows(symbol, start_ms, end_ms)
     elif exchange == "binance":
-        raw_rows = fetch_binance_bucket_rows(symbol, start_date)
+        raw_rows = fetch_binance_bucket_rows(symbol, start_date, len(existing_ts))
         raw_rows.extend(fetch_binance_api_rows(symbol, max(start_ms, int(datetime.now(tz=timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)), end_ms))
     elif exchange == "bitget":
         raw_rows = fetch_bitget_rows(symbol, start_ms)

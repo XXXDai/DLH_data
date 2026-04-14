@@ -38,6 +38,7 @@ UPLOAD_WORKERS_STARTED = False  # S3上传线程是否已启动，开关
 UPLOAD_WORKER_THREADS = []  # S3上传工作线程列表，个数
 UPLOAD_STARTUP_SYNC_DONE = False  # S3启动补传是否已完成，开关
 UPLOAD_STARTUP_SYNC_ENABLED = True  # S3启动补传扫描开关，开关
+STORAGE_S3_READ_ENABLED = True  # S3存储读取检查开关，开关
 UPLOAD_STATUS_LOCK = threading.Lock()  # S3上传状态锁，锁对象
 UPLOAD_ACTIVE_TASKS = {}  # S3活跃上传任务映射，个数
 UPLOAD_STARTUP_STATUS_LOCK = threading.Lock()  # S3启动扫描状态锁，锁对象
@@ -132,11 +133,32 @@ def request_json(url: str, timeout_seconds: int) -> dict:
         raise RuntimeError("接口请求失败: 超时") from exc
 
 
-def download_bytes(url: str, timeout_seconds: int) -> bytes:
+def download_bytes(url: str, timeout_seconds: int, progress_hook=None) -> bytes:
     """下载二进制内容并返回字节串。"""
     try:
         with urlopen(url, timeout=timeout_seconds) as response:
-            return response.read()
+            started_at = time.time()
+            total_size = int(response.headers.get("Content-Length") or 0)
+            downloaded_bytes = 0
+            buffer = BytesIO()
+            while True:
+                chunk = response.read(app_config.CHUNK_SIZE)
+                if not chunk:
+                    break
+                buffer.write(chunk)
+                downloaded_bytes += len(chunk)
+                if progress_hook:
+                    now_ts = time.time()
+                    elapsed_seconds = max(0.001, now_ts - started_at)
+                    progress_hook(
+                        {
+                            "downloaded_bytes": downloaded_bytes,
+                            "total_bytes": total_size,
+                            "speed_bytes_per_second": downloaded_bytes / elapsed_seconds,
+                            "updated_at": now_ts,
+                        }
+                    )
+            return buffer.getvalue()
     except HTTPError as exc:
         raise RuntimeError(f"下载失败: HTTP {exc.code}") from exc
     except URLError as exc:
@@ -147,12 +169,14 @@ def download_bytes(url: str, timeout_seconds: int) -> bytes:
         raise RuntimeError("下载失败: 超时") from exc
 
 
-def download_to_file(url: str, timeout_seconds: int, output_path: Path) -> int:
+def download_to_file(url: str, timeout_seconds: int, output_path: Path, progress_hook=None) -> int:
     """下载二进制内容并流式写入文件。"""
     ensure_parent(output_path)
     total_bytes = 0
     try:
         with urlopen(url, timeout=timeout_seconds) as response:
+            started_at = time.time()
+            total_size = int(response.headers.get("Content-Length") or 0)
             with output_path.open("wb") as file_obj:
                 while True:
                     chunk = response.read(app_config.CHUNK_SIZE)
@@ -160,6 +184,17 @@ def download_to_file(url: str, timeout_seconds: int, output_path: Path) -> int:
                         break
                     file_obj.write(chunk)
                     total_bytes += len(chunk)
+                    if progress_hook:
+                        now_ts = time.time()
+                        elapsed_seconds = max(0.001, now_ts - started_at)
+                        progress_hook(
+                            {
+                                "downloaded_bytes": total_bytes,
+                                "total_bytes": total_size,
+                                "speed_bytes_per_second": total_bytes / elapsed_seconds,
+                                "updated_at": now_ts,
+                            }
+                        )
         return total_bytes
     except HTTPError as exc:
         if output_path.exists():
@@ -364,6 +399,12 @@ def set_upload_startup_sync_enabled(enabled: bool) -> None:
     if not UPLOAD_STARTUP_SYNC_ENABLED:
         UPLOAD_STARTUP_SYNC_DONE = True
         update_upload_startup_status("已跳过启动扫描", 0, 0, "-", 0, 0, True)
+
+
+def set_storage_s3_read_enabled(enabled: bool) -> None:
+    """设置S3存储读取检查开关。"""
+    global STORAGE_S3_READ_ENABLED
+    STORAGE_S3_READ_ENABLED = bool(enabled)
 
 
 def upload_file_to_s3_blocking(file_path: Path) -> None:
@@ -596,7 +637,7 @@ def list_s3_file_names(dir_path: Path) -> list[str]:
 
 def list_storage_file_names(dir_path: Path) -> list[str]:
     """按当前存储模式列出目录下的直接子文件名。"""
-    if not is_s3_storage_mode():
+    if not is_s3_storage_mode() or not STORAGE_S3_READ_ENABLED:
         if not dir_path.exists():
             return []
         return sorted([path.name for path in dir_path.iterdir() if path.is_file()])
@@ -607,7 +648,7 @@ def storage_file_exists(file_path: Path) -> bool:
     """按当前存储模式判断文件是否存在。"""
     if file_path.exists():
         return True
-    if not is_s3_storage_mode():
+    if not is_s3_storage_mode() or not STORAGE_S3_READ_ENABLED:
         return False
     s3_key = build_s3_key(file_path)
     if not s3_key:
@@ -636,7 +677,7 @@ def download_file_from_storage(file_path: Path) -> bool:
     """按当前存储模式恢复单个文件到本地。"""
     if file_path.exists():
         return True
-    if not is_s3_storage_mode():
+    if not is_s3_storage_mode() or not STORAGE_S3_READ_ENABLED:
         return False
     s3_key = build_s3_key(file_path)
     if not s3_key:

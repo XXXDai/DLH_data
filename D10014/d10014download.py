@@ -98,6 +98,15 @@ def clear_memory_metrics(exchange: str) -> None:
     cex_config.clear_runtime_memory_metrics(DATASET_ID, exchange)
 
 
+def make_download_progress_hook(exchange: str, symbol: str, synced_days: int, stage_text: str):
+    """构造现货成交下载进度回调。"""
+    def hook(progress: dict) -> None:
+        """更新现货成交下载进度。"""
+        status_update(exchange, symbol, (synced_days, stage_text, progress))
+
+    return hook
+
+
 def estimate_rows_by_date_memory(rows_by_date: dict) -> tuple[int, int, int]:
     """估算按日期分组记录的内存占用。"""
     total_bytes = sys.getsizeof(rows_by_date)
@@ -194,12 +203,33 @@ def build_bitget_request(url: str) -> Request:
     )
 
 
-def download_bitget_bytes(url: str) -> bytes | None:
+def download_bitget_bytes(url: str, progress_hook=None) -> bytes | None:
     """下载Bitget归档字节内容。"""
     request = build_bitget_request(url)
     try:
         with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            return response.read()
+            started_at = time.time()
+            total_size = int(response.headers.get("Content-Length") or 0)
+            downloaded_bytes = 0
+            buffer = BytesIO()
+            while True:
+                chunk = response.read(app_config.CHUNK_SIZE)
+                if not chunk:
+                    break
+                buffer.write(chunk)
+                downloaded_bytes += len(chunk)
+                if progress_hook:
+                    now_ts = time.time()
+                    elapsed_seconds = max(0.001, now_ts - started_at)
+                    progress_hook(
+                        {
+                            "downloaded_bytes": downloaded_bytes,
+                            "total_bytes": total_size,
+                            "speed_bytes_per_second": downloaded_bytes / elapsed_seconds,
+                            "updated_at": now_ts,
+                        }
+                    )
+            return buffer.getvalue()
     except HTTPError as exc:
         if exc.code in {403, 404}:
             return None
@@ -330,7 +360,7 @@ def count_days_in_range(start_day: str, end_day: str) -> int:
     return (end_dt - start_dt).days + 1
 
 
-def download_bybit_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path) -> bool:
+def download_bybit_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path, synced_days: int = 0) -> bool:
     """下载Bybit单日现货成交文件。"""
     output_path = build_output_path(base_dir, symbol, date_str)
     if output_path.exists():
@@ -338,7 +368,8 @@ def download_bybit_day(base_dir: Path, symbol: str, date_str: str, fail_path: Pa
         return True
     url = f"{BYBIT_BASE_URL}/{symbol}/{symbol}_{date_str}.csv.gz"
     try:
-        content = download_bytes(url, TIMEOUT_SECONDS)
+        progress_hook = make_download_progress_hook("bybit", symbol, synced_days, f"日 {date_str} 请求中")
+        content = download_bytes(url, TIMEOUT_SECONDS, progress_hook)
     except RuntimeError as exc:
         append_failure(fail_path, f"bybit:{symbol}:{date_str}", "bybit", symbol, date_str, str(exc))
         return False
@@ -494,14 +525,15 @@ def split_okx_zip(archive_path: Path, symbol: str, base_dir: Path) -> int:
     return written_rows
 
 
-def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
+def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path, synced_days: int = 0, stage_text: str = "") -> bool:
     """下载并拆分Binance成交归档。"""
     archive_path = build_archive_temp_path(failure_key, url)
     if archive_path.exists():
         archive_path.unlink()
     try:
         update_memory_metrics("binance", "下载月包", 0, 0, 0, 0)
-        archive_bytes = download_to_file(url, TIMEOUT_SECONDS, archive_path)
+        progress_hook = make_download_progress_hook("binance", symbol, synced_days, stage_text or "归档请求中")
+        archive_bytes = download_to_file(url, TIMEOUT_SECONDS, archive_path, progress_hook)
     except RuntimeError as exc:
         append_failure(fail_path, failure_key, "binance", symbol, url, str(exc))
         return False
@@ -514,14 +546,15 @@ def download_binance_archive(base_dir: Path, symbol: str, url: str, failure_key:
     return True
 
 
-def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path) -> bool:
+def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str, fail_path: Path, synced_days: int = 0, stage_text: str = "") -> bool:
     """下载并拆分OKX成交归档。"""
     archive_path = build_archive_temp_path(failure_key, url)
     if archive_path.exists():
         archive_path.unlink()
     try:
         update_memory_metrics("okx", "下载月包", 0, 0, 0, 0)
-        archive_bytes = download_to_file(url, TIMEOUT_SECONDS, archive_path)
+        progress_hook = make_download_progress_hook("okx", symbol, synced_days, stage_text or "归档请求中")
+        archive_bytes = download_to_file(url, TIMEOUT_SECONDS, archive_path, progress_hook)
     except RuntimeError as exc:
         append_failure(fail_path, failure_key, "okx", symbol, url, str(exc))
         return False
@@ -534,7 +567,7 @@ def download_okx_archive(base_dir: Path, symbol: str, url: str, failure_key: str
     return True
 
 
-def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path) -> bool:
+def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: Path, synced_days: int = 0) -> bool:
     """下载Bitget单日现货成交分片。"""
     failure_key = f"bitget:{symbol}:{date_str}"
     output_path = build_output_path(base_dir, symbol, date_str)
@@ -552,7 +585,8 @@ def download_bitget_day(base_dir: Path, symbol: str, date_str: str, fail_path: P
         shard_name = f"{date_str.replace('-', '')}_{shard_tag}.zip"
         url = f"{BITGET_SPOT_BASE_URL}/{symbol}/{shard_name}"
         try:
-            content = download_bitget_bytes(url)
+            progress_hook = make_download_progress_hook("bitget", symbol, synced_days, f"日 {date_str} 分片 {shard_tag} 请求中")
+            content = download_bitget_bytes(url, progress_hook)
         except RuntimeError as exc:
             tmp_file_obj.close()
             append_failure(fail_path, failure_key, "bitget", symbol, url, str(exc))
@@ -614,7 +648,9 @@ def sync_binance_month(symbol: str, missing_dates: list[str], fail_path: Path, s
     monthly_file = f"{symbol}-trades-{month_tag}.zip"
     monthly_url = f"{BINANCE_BUCKET_URL}/data/spot/monthly/trades/{symbol}/{monthly_file}"
     month_failure_key = f"binance:{symbol}:month:{month_tag}"
-    success = download_binance_archive(base_dir, symbol, monthly_url, month_failure_key, fail_path)
+    month_stage_text = f"月 {month_tag} 请求中"
+    status_update("binance", symbol, (synced_days, month_stage_text))
+    success = download_binance_archive(base_dir, symbol, monthly_url, month_failure_key, fail_path, synced_days, month_stage_text)
     if success:
         synced_days += len(missing_dates)
         status_update("binance", symbol, (synced_days, f"月 {month_tag} {monthly_file}"))
@@ -625,8 +661,9 @@ def sync_binance_month(symbol: str, missing_dates: list[str], fail_path: Path, s
             return synced_days, False
         daily_file = f"{symbol}-trades-{date_str}.zip"
         daily_url = f"{BINANCE_BUCKET_URL}/data/spot/daily/trades/{symbol}/{daily_file}"
-        status_update("binance", symbol, (synced_days, f"日 {date_str} 请求中"))
-        if download_binance_archive(base_dir, symbol, daily_url, f"binance:{symbol}:day:{date_str}", fail_path):
+        day_stage_text = f"日 {date_str} 请求中"
+        status_update("binance", symbol, (synced_days, day_stage_text))
+        if download_binance_archive(base_dir, symbol, daily_url, f"binance:{symbol}:day:{date_str}", fail_path, synced_days, day_stage_text):
             synced_days += 1
             status_update("binance", symbol, (synced_days, f"日 {date_str} {daily_file}"))
         else:
@@ -679,7 +716,8 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
     if urls:
         for url in urls:
             file_name = url.rsplit("/", 1)[-1]
-            if download_okx_archive(base_dir, symbol, url, f"okx:{symbol}:month:{month_tag}", fail_path):
+            month_stage_text = f"月 {month_tag} 请求中"
+            if download_okx_archive(base_dir, symbol, url, f"okx:{symbol}:month:{month_tag}", fail_path, synced_days, month_stage_text):
                 synced_days += len(missing_dates)
                 status_update("okx", symbol, (synced_days, f"月 {month_tag} {file_name}"))
                 return synced_days, True
@@ -687,7 +725,8 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
         if cex_config.apply_pause_if_requested(DATASET_ID, "okx"):
             status_update("okx", symbol, cex_config.PAUSED_STATUS_TEXT)
             return synced_days, False
-        status_update("okx", symbol, (synced_days, f"日 {day_text} 请求中"))
+        day_stage_text = f"日 {day_text} 请求中"
+        status_update("okx", symbol, (synced_days, day_stage_text))
         log(f"okx {symbol} 请求日包: {day_text}")
         try:
             urls = fetch_okx_download_urls(symbol, day_text, day_text, "daily")
@@ -700,7 +739,7 @@ def sync_okx_month(symbol: str, missing_dates: list[str], fail_path: Path, synce
             status_update("okx", symbol, (synced_days, f"无文件 {day_text}"))
             continue
         file_name = urls[0].rsplit("/", 1)[-1]
-        if download_okx_archive(base_dir, symbol, urls[0], f"okx:{symbol}:day:{day_text}", fail_path):
+        if download_okx_archive(base_dir, symbol, urls[0], f"okx:{symbol}:day:{day_text}", fail_path, synced_days, day_stage_text):
             synced_days += 1
             status_update("okx", symbol, (synced_days, f"日 {day_text} {file_name}"))
         else:
@@ -718,7 +757,7 @@ def sync_bybit_month(symbol: str, missing_dates: list[str], fail_path: Path, syn
             status_update("bybit", symbol, cex_config.PAUSED_STATUS_TEXT)
             return synced_days, False
         status_update("bybit", symbol, (synced_days, f"日 {date_str} 请求中"))
-        if download_bybit_day(base_dir, symbol, date_str, fail_path):
+        if download_bybit_day(base_dir, symbol, date_str, fail_path, synced_days):
             synced_days += 1
             status_update("bybit", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
         else:
@@ -737,7 +776,7 @@ def sync_bitget_month(symbol: str, missing_dates: list[str], fail_path: Path, sy
             return synced_days, False
         status_update("bitget", symbol, (synced_days, f"日 {date_str} 请求中"))
         log(f"bitget {symbol} 请求日包: {date_str}")
-        if download_bitget_day(base_dir, symbol, date_str, fail_path):
+        if download_bitget_day(base_dir, symbol, date_str, fail_path, synced_days):
             synced_days += 1
             status_update("bitget", symbol, (synced_days, f"日 {date_str} {symbol}_{date_str}.csv.gz"))
         else:

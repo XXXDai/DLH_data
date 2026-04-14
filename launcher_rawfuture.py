@@ -26,6 +26,7 @@ def main() -> None:
     prepare_runtime_args()
     launcher.apply_storage_mode_from_argv()
     launcher.cex_common.set_upload_startup_sync_enabled(False)
+    launcher.cex_common.set_storage_s3_read_enabled(False)
     launcher.list_other_launcher_processes = list_no_wait_launcher_processes
     launcher.main()
 

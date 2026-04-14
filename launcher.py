@@ -184,7 +184,7 @@ ATTACHED_TASK_PARENTS = {
 }  # 附属任务父任务映射，映射
 WS_TASK_IDS = {"D10002-4", "D10006-8"}  # WS任务标识集合，个数
 EXIT_REQUESTED = threading.Event()  # 退出请求事件，事件
-RUNTIME_OBSERVE_CACHE = {"ts": 0.0, "text": ""}  # 运行时观测缓存，映射
+RUNTIME_OBSERVE_CACHE = {"ts": 0.0, "text": "", "download_speed": -1.0}  # 运行时观测缓存，映射
 DISK_GUARD_LOCK = threading.Lock()  # 磁盘保护状态锁，锁
 DISK_GUARD_STATE = {"free_bytes": 0, "upload_only": False}  # 磁盘保护状态，映射
 DISK_GUARD_THREAD_STARTED = False  # 磁盘保护线程是否已启动，开关
@@ -605,6 +605,42 @@ def format_bytes_text(byte_count: int) -> str:
     return f"{value:.2f} {units[unit_index]}"
 
 
+def format_download_progress_text(progress: dict) -> str:
+    """格式化下载进度与速度文本。"""
+    downloaded_bytes = int(progress.get("downloaded_bytes") or 0)
+    total_bytes = int(progress.get("total_bytes") or 0)
+    speed_text = format_speed_text(float(progress.get("speed_bytes_per_second") or 0))
+    if total_bytes > 0:
+        percent = min(100.0, downloaded_bytes * 100.0 / total_bytes)
+        return f"{percent:.1f}% {format_bytes_text(downloaded_bytes)}/{format_bytes_text(total_bytes)} {speed_text}"
+    return f"{format_bytes_text(downloaded_bytes)} {speed_text}"
+
+
+def merge_download_detail_text(detail_text: str, progress: dict | None) -> str:
+    """合并下载阶段说明与进度文本。"""
+    if not progress:
+        return detail_text
+    return f"{detail_text} | {format_download_progress_text(progress)}"
+
+
+def calculate_total_download_speed(status_counts: dict | None) -> float:
+    """统计当前活跃下载总速度。"""
+    if not status_counts:
+        return 0.0
+    now_ts = time.time()
+    total_speed = 0.0
+    for bucket in status_counts.values():
+        for value in bucket.values():
+            if not (isinstance(value, tuple) and len(value) >= 3 and isinstance(value[2], dict)):
+                continue
+            progress = value[2]
+            updated_at = float(progress.get("updated_at") or 0)
+            if updated_at <= 0 or now_ts - updated_at > 5:
+                continue
+            total_speed += float(progress.get("speed_bytes_per_second") or 0)
+    return total_speed
+
+
 def read_data_root_free_bytes() -> int:
     """读取数据根目录所在磁盘剩余空间。"""
     target_path = cex_config.DATA_DYLAN_ROOT if cex_config.DATA_DYLAN_ROOT.exists() else Path.cwd()
@@ -731,11 +767,13 @@ def read_ru_maxrss_bytes() -> int:
     return rss_value * 1024
 
 
-def build_runtime_observe_text(max_cells: int) -> str:
+def build_runtime_observe_text(max_cells: int, status_counts: dict | None = None) -> str:
     """构造运行时观测文本。"""
     now_ts = time.time()
+    total_download_speed = calculate_total_download_speed(status_counts)
     cached_text = str(RUNTIME_OBSERVE_CACHE["text"])
-    if cached_text and now_ts - float(RUNTIME_OBSERVE_CACHE["ts"]) < 1.0:
+    cached_download_speed = float(RUNTIME_OBSERVE_CACHE.get("download_speed") or 0)
+    if cached_text and now_ts - float(RUNTIME_OBSERVE_CACHE["ts"]) < 1.0 and abs(cached_download_speed - total_download_speed) < 1:
         return truncate_by_cells(cached_text, max_cells)
     rss_text = format_bytes_text(read_process_rss_bytes())
     peak_text = format_bytes_text(read_process_peak_rss_bytes())
@@ -752,11 +790,13 @@ def build_runtime_observe_text(max_cells: int) -> str:
         f"磁盘剩余: {disk_free_text} | "
         f"磁盘模式: {disk_mode_text} | "
         f"下载模式: {download_mode_text} | "
+        f"总下载: {format_speed_text(total_download_speed)} | "
         f"WS缓存 future {future_snapshot['file_count']}文件/{future_snapshot['line_count']}行 | "
         f"spot {spot_snapshot['file_count']}文件/{spot_snapshot['line_count']}行"
     )
     RUNTIME_OBSERVE_CACHE["ts"] = now_ts
     RUNTIME_OBSERVE_CACHE["text"] = text
+    RUNTIME_OBSERVE_CACHE["download_speed"] = total_download_speed
     return truncate_by_cells(text, max_cells)
 
 
@@ -810,7 +850,7 @@ def build_upload_pool_text(max_cells: int) -> str:
     return truncate_by_cells(text, max_cells)
 
 
-def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr: int, warm_attr: int, title_attr: int) -> None:
+def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr: int, warm_attr: int, title_attr: int, status_counts: dict) -> None:
     """绘制上传管理页面。"""
     snapshot = cex_common.get_upload_pool_snapshot()
     section_row = 3
@@ -826,7 +866,7 @@ def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr
         f"速度: {format_speed_text(snapshot['speed_bytes_per_second'])}"
     )
     draw_clipped_text(stdscr, subheader_row, 0, summary_text, max_cols - 1, warm_attr)
-    draw_clipped_text(stdscr, observe_row, 0, build_runtime_observe_text(max_cols - 1), max_cols - 1, title_attr)
+    draw_clipped_text(stdscr, observe_row, 0, build_runtime_observe_text(max_cols - 1, status_counts), max_cols - 1, title_attr)
     draw_clipped_text(stdscr, content_row, 0, "当前文件", max_cols - 1, header_attr)
     file_names = snapshot["file_names"] or ["当前无活跃上传"]
     row = content_row + 1
@@ -1494,7 +1534,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
             )
         draw_clipped_text(stdscr, header_row, 0, title_text, max_cols - 1, title_attr)
         if max_rows > observe_row:
-            draw_clipped_text(stdscr, observe_row, 0, build_runtime_observe_text(max_cols - 1), max_cols - 1, warm_attr)
+            draw_clipped_text(stdscr, observe_row, 0, build_runtime_observe_text(max_cols - 1, status_counts), max_cols - 1, warm_attr)
         if max_rows > tabs_row:
             tab_col = 0
             for idx, exchange in enumerate(exchanges):
@@ -1507,7 +1547,7 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
         if max_rows > rule_row:
             draw_rule(stdscr, rule_row, 0, max_cols - 1)
         if current_exchange == UPLOAD_VIEW_ID:
-            render_upload_management(stdscr, max_cols, footer_row, header_attr, warm_attr, title_attr)
+            render_upload_management(stdscr, max_cols, footer_row, header_attr, warm_attr, title_attr, status_counts)
             footer_text = "←→ 切页签  w 切仅WS  q 退出"
             if footer_row > 0:
                 draw_rule(stdscr, footer_row - 1, 0, max_cols - 1)
@@ -1684,10 +1724,14 @@ def run_tui(stdscr, tasks, status_counts, status_times, status_meta, logs, pendi
                         and isinstance(value[0], (int, float))
                     ):
                         stage_text, current_text, detail_text, _sync_text = parse_download_status(str(value[1]))
+                        progress = value[2] if len(value) >= 3 and isinstance(value[2], dict) else None
+                        detail_text = merge_download_detail_text(detail_text, progress)
                         status_items.append((key, display_key, (int(value[0]), stage_text, current_text, detail_text), None))
                         continue
                     if isinstance(value, tuple) and len(value) >= 2 and isinstance(value[0], (int, float)):
-                        line_text = f"{display_key}: {value[0]} {value[1]}"
+                        progress = value[2] if len(value) >= 3 and isinstance(value[2], dict) else None
+                        detail_text = merge_download_detail_text(str(value[1]), progress)
+                        line_text = f"{display_key}: {value[0]} {detail_text}"
                     else:
                         line_text = f"{display_key}: {value}"
                     if current.task_id in ws_tasks:
