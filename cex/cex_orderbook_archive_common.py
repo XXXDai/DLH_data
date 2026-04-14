@@ -619,6 +619,9 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
         status_update(exchange, market, symbol, cex_config.UNSUPPORTED_STATUS_TEXT)
         return
     end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    end_date_limit = cex_config.get_max_end_date(dataset_id, exchange)
+    if end_date_limit:
+        end_dt = min(end_dt, datetime.strptime(end_date_limit, "%Y-%m-%d"))
     end_date = end_dt.strftime("%Y-%m-%d")
     existing_dates = get_existing_dates(base_dir, exchange, market, symbol)
     done_count = 0
@@ -677,14 +680,14 @@ def sync_symbol(exchange: str, market: str, symbol: str) -> None:
 def resolve_symbols(exchange: str, market: str) -> list[str]:
     """解析指定交易所历史订单簿交易对列表。"""
     if market == "spot":
-        return cex_config.get_spot_symbols(exchange)
+        return cex_config.filter_runtime_symbols(exchange, cex_config.get_spot_symbols(exchange))
     symbols = set(cex_config.get_future_symbols(exchange))
     if exchange == "bybit":
         try:
             symbols.update(list_bybit_delivery_symbols_since(cex_config.get_min_start_date(dataset_id_for_market(market), "bybit")))
         except NetworkRequestError as exc:
             log_market(market, f"bybit future 动态交割合约刷新失败，继续使用静态列表: {exc}")
-    return sorted(symbols)
+    return cex_config.filter_runtime_symbols(exchange, sorted(symbols))
 
 
 def mark_unsupported_exchanges(market: str) -> None:

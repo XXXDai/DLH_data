@@ -246,7 +246,7 @@ def resolve_okx_symbols() -> tuple[list[str], dict[str, str]]:
     """解析OKX期货成交交易对列表与起始日期。"""
     symbols = set(cex_config.get_future_trade_symbols("okx"))
     symbols.update(cex_config.get_delivery_families("okx"))
-    return sorted(symbols), {}
+    return cex_config.filter_runtime_symbols("okx", sorted(symbols)), {}
 
 
 def parse_bitget_date_from_name(file_name: str) -> str | None:
@@ -853,6 +853,9 @@ def run_exchange(exchange: str, symbols: list, month_worker, dynamic_start_dates
         clear_memory_metrics(exchange)
         return
     end_dt = datetime.now(tz=timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    end_date_limit = cex_config.get_max_end_date(DATASET_ID, exchange)
+    if end_date_limit:
+        end_dt = min(end_dt, datetime.strptime(end_date_limit, "%Y-%m-%d"))
     if end_dt < datetime(2000, 1, 1):
         return
     dynamic_start_dates = dynamic_start_dates or {}
@@ -922,30 +925,41 @@ def run_exchange(exchange: str, symbols: list, month_worker, dynamic_start_dates
 def main() -> None:
     """运行期货成交下载主循环。"""
     while True:
-        bybit_symbols, bybit_start_dates = resolve_bybit_symbols()
-        okx_symbols, okx_start_dates = resolve_okx_symbols()
-        threads = [
-            threading.Thread(
-                target=run_exchange,
-                args=("bybit", bybit_symbols, sync_bybit_month, bybit_start_dates),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=run_exchange,
-                args=("binance", cex_config.get_future_trade_symbols("binance"), sync_binance_month),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=run_exchange,
-                args=("bitget", cex_config.get_future_trade_symbols("bitget"), sync_bitget_month),
-                daemon=True,
-            ),
-            threading.Thread(
-                target=run_exchange,
-                args=("okx", okx_symbols, sync_okx_month, okx_start_dates),
-                daemon=True,
-            ),
-        ]
+        threads = []
+        if cex_config.is_supported(DATASET_ID, "bybit"):
+            bybit_symbols, bybit_start_dates = resolve_bybit_symbols()
+            threads.append(
+                threading.Thread(
+                    target=run_exchange,
+                    args=("bybit", bybit_symbols, sync_bybit_month, bybit_start_dates),
+                    daemon=True,
+                )
+            )
+        if cex_config.is_supported(DATASET_ID, "binance"):
+            threads.append(
+                threading.Thread(
+                    target=run_exchange,
+                    args=("binance", cex_config.get_future_trade_symbols("binance"), sync_binance_month),
+                    daemon=True,
+                )
+            )
+        if cex_config.is_supported(DATASET_ID, "bitget"):
+            threads.append(
+                threading.Thread(
+                    target=run_exchange,
+                    args=("bitget", cex_config.get_future_trade_symbols("bitget"), sync_bitget_month),
+                    daemon=True,
+                )
+            )
+        if cex_config.is_supported(DATASET_ID, "okx"):
+            okx_symbols, okx_start_dates = resolve_okx_symbols()
+            threads.append(
+                threading.Thread(
+                    target=run_exchange,
+                    args=("okx", okx_symbols, sync_okx_month, okx_start_dates),
+                    daemon=True,
+                )
+            )
         for thread in threads:
             thread.start()
         for thread in threads:

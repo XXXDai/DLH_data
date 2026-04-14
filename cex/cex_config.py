@@ -433,10 +433,95 @@ TASK_CONTROL_LOCK = threading.Lock()  # 任务控制状态锁，锁
 TASK_CONTROL_EVENT = threading.Event()  # 任务控制唤醒事件，事件
 RUNTIME_MEMORY_METRICS = {}  # 运行时内存观测映射，映射
 RUNTIME_MEMORY_METRICS_LOCK = threading.Lock()  # 运行时内存观测锁，锁
+RUNTIME_TARGET_MODE = ""  # 运行时专项模式标识，字符串
+OKX_ETH_PRIORITY_TASK_IDS = {"D10001", "D10005", "D10011", "D10012", "D10013", "D10014"}  # OKX专项任务集合，个数
+FUTURE_RAW_PRIORITY_TASK_IDS = {"D10001", "D10013"}  # 原始期货专项任务集合，个数
+RUNTIME_TARGET_SCOPE = {"exchanges": [], "base_coin": "", "start_date": "", "end_date": ""}  # 运行时专项范围，映射
+
+
+def set_runtime_target_mode(mode: str) -> None:
+    """设置运行时专项模式。"""
+    global RUNTIME_TARGET_MODE
+    RUNTIME_TARGET_MODE = mode
+
+
+def set_runtime_target_scope(exchanges: list[str], base_coin: str, start_date: str, end_date: str) -> None:
+    """设置运行时专项范围。"""
+    RUNTIME_TARGET_SCOPE["exchanges"] = list(exchanges)
+    RUNTIME_TARGET_SCOPE["base_coin"] = str(base_coin)
+    RUNTIME_TARGET_SCOPE["start_date"] = str(start_date)
+    RUNTIME_TARGET_SCOPE["end_date"] = str(end_date)
+
+
+def is_okx_eth_priority_mode() -> bool:
+    """判断是否启用OKX的ETH专项模式。"""
+    return RUNTIME_TARGET_MODE == "okx_eth_priority"
+
+
+def is_future_raw_priority_mode() -> bool:
+    """判断是否启用原始期货专项模式。"""
+    return RUNTIME_TARGET_MODE == "future_raw_priority"
+
+
+def get_okx_eth_priority_task_ids() -> list[str]:
+    """返回OKX的ETH专项任务列表。"""
+    return sorted(OKX_ETH_PRIORITY_TASK_IDS)
+
+
+def get_future_raw_priority_task_ids() -> list[str]:
+    """返回原始期货专项任务列表。"""
+    return sorted(FUTURE_RAW_PRIORITY_TASK_IDS)
+
+
+def get_runtime_target_exchanges() -> list[str]:
+    """返回运行时专项交易所列表。"""
+    return list(RUNTIME_TARGET_SCOPE["exchanges"])
+
+
+def get_runtime_target_base_coin() -> str:
+    """返回运行时专项基础币种。"""
+    return str(RUNTIME_TARGET_SCOPE["base_coin"])
+
+
+def get_runtime_target_start_date() -> str:
+    """返回运行时专项起始日期。"""
+    return str(RUNTIME_TARGET_SCOPE["start_date"])
+
+
+def get_runtime_target_end_date() -> str:
+    """返回运行时专项结束日期。"""
+    return str(RUNTIME_TARGET_SCOPE["end_date"])
+
+
+def get_runtime_future_symbol(exchange: str) -> str:
+    """返回运行时专项永续交易对。"""
+    base_coin = get_runtime_target_base_coin()
+    if not base_coin:
+        return ""
+    if exchange == "okx":
+        return f"{base_coin}-USDT-SWAP"
+    return f"{base_coin}USDT"
+
+
+def filter_runtime_symbols(exchange: str, symbols: list[str]) -> list[str]:
+    """按运行时专项模式过滤交易对列表。"""
+    if is_future_raw_priority_mode():
+        target_symbol = get_runtime_future_symbol(exchange)
+        if not target_symbol:
+            return []
+        return [symbol for symbol in symbols if symbol == target_symbol]
+    if not is_okx_eth_priority_mode() or exchange != "okx":
+        return list(symbols)
+    allowed = {"ETH-USDT", "ETH-USDT-SWAP"}  # OKX专项允许交易对集合，个数
+    return [symbol for symbol in symbols if symbol in allowed]
 
 
 def list_exchanges() -> list:
     """返回全部CEX交易所。"""
+    if is_future_raw_priority_mode():
+        return [exchange for exchange in get_runtime_target_exchanges() if EXCHANGE_ENABLED.get(exchange, False)]
+    if is_okx_eth_priority_mode():
+        return ["okx"] if EXCHANGE_ENABLED.get("okx", False) else []
     return [exchange for exchange in CEX_EXCHANGES if EXCHANGE_ENABLED.get(exchange, False)]
 
 
@@ -464,21 +549,37 @@ def merge_symbols(base_symbols: list, extra_symbols: list) -> list:
 
 def get_spot_symbols(exchange: str) -> list:
     """返回指定交易所现货交易对。"""
+    if is_future_raw_priority_mode():
+        return []
+    if is_okx_eth_priority_mode() and exchange == "okx":
+        return ["ETH-USDT"]
     return list(SPOT_SYMBOLS.get(exchange, []))
 
 
 def get_future_symbols(exchange: str) -> list:
     """返回指定交易所永续交易对。"""
+    if is_future_raw_priority_mode():
+        return filter_runtime_symbols(exchange, list(FUTURE_PERPETUAL_SYMBOLS.get(exchange, [])))
+    if is_okx_eth_priority_mode() and exchange == "okx":
+        return ["ETH-USDT-SWAP"]
     return list(FUTURE_PERPETUAL_SYMBOLS.get(exchange, []))
 
 
 def get_spot_trade_symbols(exchange: str) -> list:
     """返回指定交易所现货成交交易对。"""
+    if is_future_raw_priority_mode():
+        return []
+    if is_okx_eth_priority_mode() and exchange == "okx":
+        return ["ETH-USDT"]
     return merge_symbols(SPOT_SYMBOLS.get(exchange, []), XSTOCK_SPOT_TRADE_SYMBOLS.get(exchange, []))
 
 
 def get_future_trade_symbols(exchange: str) -> list:
     """返回指定交易所期货成交交易对。"""
+    if is_future_raw_priority_mode():
+        return filter_runtime_symbols(exchange, merge_symbols(FUTURE_PERPETUAL_SYMBOLS.get(exchange, []), XSTOCK_FUTURE_TRADE_SYMBOLS.get(exchange, [])))
+    if is_okx_eth_priority_mode() and exchange == "okx":
+        return ["ETH-USDT-SWAP"]
     return merge_symbols(FUTURE_PERPETUAL_SYMBOLS.get(exchange, []), XSTOCK_FUTURE_TRADE_SYMBOLS.get(exchange, []))
 
 
@@ -489,17 +590,31 @@ def get_funding_symbols(exchange: str) -> list:
 
 def get_delivery_families(exchange: str) -> list:
     """返回指定交易所交割合约家族。"""
+    if is_future_raw_priority_mode():
+        return []
+    if is_okx_eth_priority_mode() and exchange == "okx":
+        return ["ETH-USDT"]
     return list(FUTURE_DELIVERY_FAMILIES.get(exchange, []))
 
 
 def get_supported_exchanges(dataset_id: str) -> list:
     """返回指定数据集支持的交易所。"""
-    support_map = DATASET_SUPPORT.get(dataset_id, {})
-    return [exchange for exchange in CEX_EXCHANGES if is_exchange_enabled(exchange) and support_map.get(exchange)]
+    return [exchange for exchange in list_exchanges() if is_supported(dataset_id, exchange)]
 
 
 def is_supported(dataset_id: str, exchange: str) -> bool:
     """判断指定数据集是否支持该交易所。"""
+    if is_future_raw_priority_mode():
+        if exchange not in get_runtime_target_exchanges():
+            return False
+        if dataset_id not in FUTURE_RAW_PRIORITY_TASK_IDS:
+            return False
+        return is_exchange_enabled(exchange)
+    if is_okx_eth_priority_mode():
+        if exchange != "okx":
+            return False
+        if dataset_id not in OKX_ETH_PRIORITY_TASK_IDS:
+            return False
     return is_exchange_enabled(exchange) and bool(DATASET_SUPPORT.get(dataset_id, {}).get(exchange))
 
 
@@ -611,6 +726,8 @@ def get_runtime_memory_metrics(dataset_id: str, exchange: str) -> dict:
 
 def get_start_date(dataset_id: str, exchange: str, symbol: str) -> str:
     """返回指定数据集的起始日期。"""
+    if is_future_raw_priority_mode() and exchange in get_runtime_target_exchanges() and dataset_id in FUTURE_RAW_PRIORITY_TASK_IDS:
+        return get_runtime_target_start_date()
     dataset_map = DATASET_START_DATES.get(dataset_id, {})
     exchange_map = dataset_map.get(exchange, {})
     if symbol in exchange_map:
@@ -621,12 +738,21 @@ def get_start_date(dataset_id: str, exchange: str, symbol: str) -> str:
 
 def get_min_start_date(dataset_id: str, exchange: str) -> str:
     """返回指定数据集的最小起始日期。"""
+    if is_future_raw_priority_mode() and exchange in get_runtime_target_exchanges() and dataset_id in FUTURE_RAW_PRIORITY_TASK_IDS:
+        return get_runtime_target_start_date()
     base_values = list(DATASET_START_DATES.get(dataset_id, {}).get(exchange, {}).values())
     xstock_values = list(XSTOCK_DATASET_START_DATES.get(dataset_id, {}).get(exchange, {}).values())
     values = base_values + xstock_values
     if not values:
         return ""
     return min(values)
+
+
+def get_max_end_date(dataset_id: str, exchange: str) -> str:
+    """返回指定数据集的结束日期上限。"""
+    if is_future_raw_priority_mode() and exchange in get_runtime_target_exchanges() and dataset_id in FUTURE_RAW_PRIORITY_TASK_IDS:
+        return get_runtime_target_end_date()
+    return ""
 
 
 def get_source_dir(dataset_id: str, exchange: str) -> Path | None:

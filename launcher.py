@@ -52,6 +52,56 @@ def has_no_wss_flag() -> bool:
     return "-nowss" in sys.argv
 
 
+def has_okx_eth_priority_flag() -> bool:
+    """判断是否启用OKX的ETH专项模式。"""
+    return "-okxeth" in sys.argv
+
+
+def get_future_raw_priority_arg() -> str:
+    """返回原始期货专项参数原文。"""
+    for arg in sys.argv:
+        if arg.startswith("-rawfuture="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+def normalize_priority_base_coin(symbol_text: str) -> str:
+    """将交易对文本归一化为基础币种。"""
+    text = symbol_text.strip().upper()
+    if text.endswith("-USDT-SWAP"):
+        return text.split("-", 1)[0]
+    if text.endswith("USDT"):
+        return text[: -len("USDT")]
+    return text
+
+
+def parse_future_raw_priority_scope() -> dict | None:
+    """解析原始期货专项参数。"""
+    raw_value = get_future_raw_priority_arg()
+    if not raw_value:
+        return None
+    parts = [item.strip() for item in raw_value.split(":")]
+    if len(parts) != 4:
+        return None
+    exchanges = [item.strip().lower() for item in parts[0].split(",") if item.strip()]
+    valid_exchanges = [exchange for exchange in exchanges if exchange in cex_config.CEX_EXCHANGES]
+    if not valid_exchanges:
+        return None
+    base_coin = normalize_priority_base_coin(parts[1])
+    if not base_coin:
+        return None
+    start_date = parts[2]
+    end_date = parts[3]
+    if not start_date or not end_date:
+        return None
+    return {
+        "exchanges": valid_exchanges,
+        "base_coin": base_coin,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+
 def resolve_process_cwd(pid: int) -> str:
     """解析目标进程的工作目录。"""
     proc_cwd_path = Path(f"/proc/{pid}/cwd")
@@ -994,6 +1044,11 @@ def filter_tasks(tasks: list, selected: list) -> list:
 
 def apply_runtime_task_flags(tasks: list[Task]) -> list[Task]:
     """按启动参数过滤运行时任务列表。"""
+    future_raw_scope = parse_future_raw_priority_scope()
+    if future_raw_scope:
+        tasks = filter_tasks(tasks, cex_config.get_future_raw_priority_task_ids())
+    if has_okx_eth_priority_flag():
+        tasks = filter_tasks(tasks, cex_config.get_okx_eth_priority_task_ids())
     if not has_no_wss_flag():
         return tasks
     return [task for task in tasks if task.task_id not in WS_TASK_IDS]
@@ -1185,6 +1240,21 @@ def render_pre_tui(startup_progress: dict) -> None:
 
 def start_tasks(selected: list | None = None, startup_progress: dict | None = None) -> tuple[list, dict, dict, dict, dict, dict]:
     """启动全部任务并返回运行时容器。"""
+    future_raw_scope = parse_future_raw_priority_scope()
+    if future_raw_scope:
+        cex_config.set_runtime_target_mode("future_raw_priority")
+        cex_config.set_runtime_target_scope(
+            future_raw_scope["exchanges"],
+            future_raw_scope["base_coin"],
+            future_raw_scope["start_date"],
+            future_raw_scope["end_date"],
+        )
+    elif has_okx_eth_priority_flag():
+        cex_config.set_runtime_target_mode("okx_eth_priority")
+        cex_config.set_runtime_target_scope([], "", "", "")
+    else:
+        cex_config.set_runtime_target_mode("")
+        cex_config.set_runtime_target_scope([], "", "", "")
     update_startup_progress(startup_progress, "加载任务定义", 0, len(TASK_DEFS), "准备构建任务列表")
     if has_s3_only_flag():
         set_ws_only_state(False)

@@ -82,7 +82,8 @@ def resolve_symbols(input_dataset_id: str, exchange: str, base_dir: Path) -> lis
         configured = cex_config.get_future_symbols(exchange)
     else:
         configured = cex_config.get_spot_symbols(exchange)
-    return sorted(set(configured) | set(list_input_symbols(base_dir)))
+    merged_symbols = sorted(set(configured) | set(list_input_symbols(base_dir)))
+    return cex_config.filter_runtime_symbols(exchange, merged_symbols)
 
 
 def output_depth_for_dataset(input_dataset_id: str, exchange: str) -> int:
