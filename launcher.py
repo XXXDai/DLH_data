@@ -1255,6 +1255,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
     else:
         cex_config.set_runtime_target_mode("")
         cex_config.set_runtime_target_scope([], "", "", "")
+    priority_download_mode = bool(future_raw_scope) or has_okx_eth_priority_flag()
     update_startup_progress(startup_progress, "加载任务定义", 0, len(TASK_DEFS), "准备构建任务列表")
     if has_s3_only_flag():
         set_ws_only_state(False)
@@ -1363,7 +1364,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
         start_task_list(task_list)
 
     other_launchers = list_other_launcher_processes()
-    if other_launchers and not has_no_wss_flag():
+    if other_launchers and not has_no_wss_flag() and not priority_download_mode:
         update_startup_progress(startup_progress, "检测旧版本", 0, len(tasks), "发现旧版本进程，先启动WS待切换模式")
         future_ws_selected = any(task.task_id == "D10002-4" for task in tasks)
         spot_ws_selected = any(task.task_id == "D10006-8" for task in tasks)
@@ -1409,7 +1410,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             apply_upload_only_mode(tasks, logs, status_times, True, reason_text)
             update_startup_progress(startup_progress, "启动完成", len(tasks), len(tasks), "磁盘空间不足，仅启动上传")
             return tasks, status_counts, status_times, status_meta, logs, pending
-        if not has_no_wss_flag():
+        if not has_no_wss_flag() and not priority_download_mode:
             apply_ws_only_mode(tasks, logs, status_times, True, "S3模式默认仅启动WS，下载任务保持暂停")
     else:
         set_ws_only_state(False)
