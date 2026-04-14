@@ -331,10 +331,20 @@ def get_upload_pool_snapshot() -> dict:
     alive_worker_count = sum(1 for worker in UPLOAD_WORKER_THREADS if worker.is_alive())
     speed_bytes_per_second = 0.0
     file_names = []
+    active_task_details = []
     for item in active_tasks:
         file_names.append(item["file_name"])
         elapsed_seconds = max(0.001, time.time() - float(item["started_at"]))
-        speed_bytes_per_second += float(item["uploaded_bytes"]) / elapsed_seconds
+        item_speed = float(item["uploaded_bytes"]) / elapsed_seconds
+        speed_bytes_per_second += item_speed
+        active_task_details.append(
+            {
+                "file_name": str(item["file_name"]),
+                "uploaded_bytes": int(item["uploaded_bytes"]),
+                "total_bytes": int(item["total_bytes"]),
+                "speed_bytes_per_second": item_speed,
+            }
+        )
     return {
         "enabled": is_s3_storage_mode(),
         "workers": app_config.S3_UPLOAD_POOL_WORKERS,
@@ -344,6 +354,7 @@ def get_upload_pool_snapshot() -> dict:
         "startup_synced": UPLOAD_STARTUP_SYNC_DONE,
         "speed_bytes_per_second": speed_bytes_per_second,
         "file_names": file_names,
+        "active_task_details": active_task_details,
         "pending_file_names": pending_file_names,
     }
 

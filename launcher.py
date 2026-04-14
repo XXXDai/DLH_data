@@ -863,6 +863,16 @@ def build_upload_pool_text(max_cells: int) -> str:
     return truncate_by_cells(text, max_cells)
 
 
+def format_upload_task_text(item: dict) -> str:
+    """格式化单个上传文件进度文本。"""
+    progress = {
+        "downloaded_bytes": int(item.get("uploaded_bytes") or 0),
+        "total_bytes": int(item.get("total_bytes") or 0),
+        "speed_bytes_per_second": float(item.get("speed_bytes_per_second") or 0),
+    }
+    return f"{item.get('file_name', '-')} | {format_download_progress_text(progress)}"
+
+
 def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr: int, warm_attr: int, title_attr: int, status_counts: dict) -> None:
     """绘制上传管理页面。"""
     snapshot = cex_common.get_upload_pool_snapshot()
@@ -881,12 +891,15 @@ def render_upload_management(stdscr, max_cols: int, footer_row: int, header_attr
     draw_clipped_text(stdscr, subheader_row, 0, summary_text, max_cols - 1, warm_attr)
     draw_clipped_text(stdscr, observe_row, 0, build_runtime_observe_text(max_cols - 1, status_counts), max_cols - 1, title_attr)
     draw_clipped_text(stdscr, content_row, 0, "当前文件", max_cols - 1, header_attr)
-    file_names = snapshot["file_names"] or ["当前无活跃上传"]
+    active_task_details = snapshot.get("active_task_details") or []
     row = content_row + 1
-    for file_name in file_names:
+    if not active_task_details:
+        draw_clipped_text(stdscr, row, 0, "- 当前无活跃上传", max_cols - 1, 0)
+        row += 1
+    for item in active_task_details:
         if row >= footer_row - 3:
             break
-        draw_clipped_text(stdscr, row, 0, f"- {file_name}", max_cols - 1, title_attr if file_name != "当前无活跃上传" else 0)
+        draw_clipped_text(stdscr, row, 0, f"- {format_upload_task_text(item)}", max_cols - 1, title_attr)
         row += 1
     if row < footer_row - 2:
         draw_clipped_text(stdscr, row, 0, "待上传前15个", max_cols - 1, header_attr)
