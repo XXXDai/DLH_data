@@ -30,20 +30,38 @@ def build_raw_future_symbol(exchange: str, base_coin: str) -> str:
     return f"{base_coin}USDT"
 
 
+def build_raw_future_orderbook_path(exchange: str, base_dir: Path, symbol: str, date_str: str) -> Path:
+    """构造原始期货订单簿文件路径。"""
+    if exchange == "bybit":
+        return base_dir / symbol / f"{date_str}_{symbol}_ob200.data.zip"
+    if exchange == "binance":
+        return base_dir / symbol / f"{symbol}-bookTicker-{date_str}.zip"
+    if exchange == "bitget":
+        return base_dir / symbol / f"{date_str.replace('-', '')}.zip"
+    return base_dir / symbol / f"{date_str}_{symbol}_ob400.data.zip"
+
+
+def build_raw_future_trade_path(base_dir: Path, symbol: str, date_str: str) -> Path:
+    """构造原始期货成交文件路径。"""
+    return base_dir / symbol / f"{symbol}{date_str}.csv.gz"
+
+
 def build_raw_future_upload_scan_roots() -> list[Path]:
-    """构造原始期货专项上传扫描目录列表。"""
+    """构造原始期货专项上传扫描文件列表。"""
     scope = launcher.parse_future_raw_priority_scope()
     if not scope:
         return []
-    roots = []
+    paths = []
     for exchange in scope["exchanges"]:
         symbol = build_raw_future_symbol(exchange, scope["base_coin"])
-        for dataset_id in cex_config.get_future_raw_priority_task_ids():
-            base_dir = cex_config.get_source_dir(dataset_id, exchange)
-            if not base_dir:
-                continue
-            roots.append(base_dir / symbol)
-    return roots
+        orderbook_base_dir = cex_config.get_source_dir("D10001", exchange)
+        trade_base_dir = cex_config.get_source_dir("D10013", exchange)
+        for date_str in launcher.cex_common.iter_dates(scope["start_date"], scope["end_date"]):
+            if orderbook_base_dir:
+                paths.append(build_raw_future_orderbook_path(exchange, orderbook_base_dir, symbol, date_str))
+            if trade_base_dir:
+                paths.append(build_raw_future_trade_path(trade_base_dir, symbol, date_str))
+    return paths
 
 
 def main() -> None:

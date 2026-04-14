@@ -190,6 +190,9 @@ DISK_GUARD_STATE = {"free_bytes": 0, "upload_only": False}  # 磁盘保护状态
 DISK_GUARD_THREAD_STARTED = False  # 磁盘保护线程是否已启动，开关
 WS_ONLY_LOCK = threading.Lock()  # 仅WS模式状态锁，锁
 WS_ONLY_STATE = {"enabled": False}  # 仅WS模式状态，映射
+DOWNLOAD_PROGRESS_LOCK = threading.Lock()  # 下载进度缓存锁，锁
+DOWNLOAD_PROGRESS_CACHE = {}  # 最近下载进度缓存，映射
+DOWNLOAD_PROGRESS_STALE_SECONDS = 10.0  # 下载速度保活窗口，秒
 
 SCHEDULE_REFRESH_SECONDS = app_config.SCHEDULE_REFRESH_SECONDS  # 触发时间刷新间隔，秒
 WS_STATUS_STALE_SECONDS = app_config.WS_STATUS_STALE_SECONDS  # WS状态超时，秒
@@ -623,21 +626,31 @@ def merge_download_detail_text(detail_text: str, progress: dict | None) -> str:
     return f"{detail_text} | {format_download_progress_text(progress)}"
 
 
+def update_download_progress_cache(task_id: str, key: str, value) -> None:
+    """更新最近下载进度缓存。"""
+    cache_key = f"{task_id}:{key}"
+    with DOWNLOAD_PROGRESS_LOCK:
+        if value is None:
+            DOWNLOAD_PROGRESS_CACHE.pop(cache_key, None)
+            return
+        if isinstance(value, tuple) and len(value) >= 3 and isinstance(value[2], dict):
+            DOWNLOAD_PROGRESS_CACHE[cache_key] = dict(value[2])
+
+
 def calculate_total_download_speed(status_counts: dict | None) -> float:
     """统计当前活跃下载总速度。"""
-    if not status_counts:
-        return 0.0
     now_ts = time.time()
     total_speed = 0.0
-    for bucket in status_counts.values():
-        for value in bucket.values():
-            if not (isinstance(value, tuple) and len(value) >= 3 and isinstance(value[2], dict)):
-                continue
-            progress = value[2]
+    stale_keys = []
+    with DOWNLOAD_PROGRESS_LOCK:
+        for cache_key, progress in DOWNLOAD_PROGRESS_CACHE.items():
             updated_at = float(progress.get("updated_at") or 0)
-            if updated_at <= 0 or now_ts - updated_at > 5:
+            if updated_at <= 0 or now_ts - updated_at > DOWNLOAD_PROGRESS_STALE_SECONDS:
+                stale_keys.append(cache_key)
                 continue
             total_speed += float(progress.get("speed_bytes_per_second") or 0)
+        for cache_key in stale_keys:
+            DOWNLOAD_PROGRESS_CACHE.pop(cache_key, None)
     return total_speed
 
 
@@ -1043,7 +1056,7 @@ def filter_logs_for_exchange(log_lines: list, exchange: str) -> list:
             continue
         if not any(name in lower_line for name in exchange_names):
             filtered.append(line)
-    return filtered
+    return filtered if filtered else log_lines
 
 
 def filter_logs_for_status(log_lines: list, exchange: str, status_key: str) -> list:
@@ -1328,6 +1341,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
 
     def make_hook(task_id: str):
         def hook(key: str, value) -> None:
+            """写入任务状态并同步下载进度缓存。"""
             bucket = status_counts.setdefault(task_id, {})
             meta = status_meta.setdefault(task_id, {})
             if value is None:
@@ -1336,6 +1350,7 @@ def start_tasks(selected: list | None = None, startup_progress: dict | None = No
             else:
                 bucket[key] = value
                 meta[key] = time.time()
+            update_download_progress_cache(task_id, key, value)
             status_times[task_id] = time.time()
         return hook
 
