@@ -25,6 +25,7 @@ def main() -> None:
     """运行原始期货专项独立启动器。"""
     prepare_runtime_args()
     launcher.apply_storage_mode_from_argv()
+    launcher.cex_common.set_upload_startup_sync_enabled(False)
     launcher.list_other_launcher_processes = list_no_wait_launcher_processes
     launcher.main()
 

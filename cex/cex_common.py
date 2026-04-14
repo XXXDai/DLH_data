@@ -37,6 +37,7 @@ UPLOAD_PENDING_PATHS = set()  # S3待上传文件集合，个数
 UPLOAD_WORKERS_STARTED = False  # S3上传线程是否已启动，开关
 UPLOAD_WORKER_THREADS = []  # S3上传工作线程列表，个数
 UPLOAD_STARTUP_SYNC_DONE = False  # S3启动补传是否已完成，开关
+UPLOAD_STARTUP_SYNC_ENABLED = True  # S3启动补传扫描开关，开关
 UPLOAD_STATUS_LOCK = threading.Lock()  # S3上传状态锁，锁对象
 UPLOAD_ACTIVE_TASKS = {}  # S3活跃上传任务映射，个数
 UPLOAD_STARTUP_STATUS_LOCK = threading.Lock()  # S3启动扫描状态锁，锁对象
@@ -355,6 +356,16 @@ def reset_upload_runtime() -> None:
     UPLOAD_STARTUP_SYNC_DONE = False
 
 
+def set_upload_startup_sync_enabled(enabled: bool) -> None:
+    """设置S3启动补传扫描开关。"""
+    global UPLOAD_STARTUP_SYNC_ENABLED
+    global UPLOAD_STARTUP_SYNC_DONE
+    UPLOAD_STARTUP_SYNC_ENABLED = bool(enabled)
+    if not UPLOAD_STARTUP_SYNC_ENABLED:
+        UPLOAD_STARTUP_SYNC_DONE = True
+        update_upload_startup_status("已跳过启动扫描", 0, 0, "-", 0, 0, True)
+
+
 def upload_file_to_s3_blocking(file_path: Path) -> None:
     """同步上传单个本地文件到S3。"""
     if not is_s3_storage_mode():
@@ -411,6 +422,7 @@ def upload_worker_loop() -> None:
 def ensure_upload_workers_started() -> None:
     """确保S3上传线程池已启动。"""
     global UPLOAD_WORKERS_STARTED
+    global UPLOAD_STARTUP_SYNC_DONE
     with UPLOAD_QUEUE_LOCK:
         alive_threads = [worker for worker in UPLOAD_WORKER_THREADS if worker.is_alive()]
         UPLOAD_WORKER_THREADS[:] = alive_threads
@@ -423,6 +435,10 @@ def ensure_upload_workers_started() -> None:
             worker.start()
             UPLOAD_WORKER_THREADS.append(worker)
         UPLOAD_WORKERS_STARTED = True
+    if not UPLOAD_STARTUP_SYNC_ENABLED:
+        UPLOAD_STARTUP_SYNC_DONE = True
+        update_upload_startup_status("已跳过启动扫描", 0, 0, "-", 0, 0, True)
+        return
     sync_local_files_to_s3_on_startup()
 
 
